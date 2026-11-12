@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
 
+from backend.agent.agent import AgentOutputError, AgentUnavailableError, CareSyncAgent
 from backend.models.supervision import (
     ContractStatus,
     Approval,
@@ -18,6 +19,8 @@ from backend.models.supervision import (
 )
 from backend.schemas import (
     ApprovalDecisionRequest,
+    AgentChatRequest,
+    AgentChatResponse,
     CaregiverAvailabilityCreate,
     ContractCreate,
 )
@@ -28,6 +31,7 @@ app = FastAPI(
     description="A family supervision coordination application.",
     version="0.1.0",
 )
+agent = CareSyncAgent()
 
 
 @app.get("/")
@@ -180,11 +184,22 @@ def receive_agent_event(event: CaregiverCancellationEvent) -> CancellationOutcom
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@app.post("/agent/chat", response_model=AgentChatResponse)
+def chat_with_agent(payload: AgentChatRequest) -> AgentChatResponse:
+    require_local_workflow_mode()
+    try:
+        return agent.respond(payload.message)
+    except AgentUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except AgentOutputError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
 def require_local_workflow_mode() -> None:
     if store.environment not in {"development", "dev", "test", "testing"}:
         raise HTTPException(
             status_code=501,
-            detail="Approval actions require authenticated identity, which is not configured.",
+            detail="This workflow requires authenticated identity, which is not configured.",
         )
 
 
