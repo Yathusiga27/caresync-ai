@@ -81,6 +81,21 @@ class CaregiverAvailability(CareSyncModel):
         return value
 
 
+class CaregiverCancellationEvent(CareSyncModel):
+    id: str
+    contract_id: str
+    caregiver_id: str
+    occurred_at: datetime
+    reason: str = Field(min_length=1)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def occurred_at_must_be_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone")
+        return value
+
+
 class ContractStatus(str, Enum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
@@ -99,6 +114,7 @@ class DecisionStatus(str, Enum):
     REJECTED = "REJECTED"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+    INVALIDATED = "INVALIDATED"
 
 
 class HandoverStatus(str, Enum):
@@ -145,6 +161,7 @@ class ProposalStatus(str, Enum):
     REJECTED = "REJECTED"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+    CONFIRMED = "CONFIRMED"
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
 
@@ -177,6 +194,17 @@ class SupervisionProposal(CareSyncModel):
         return value
 
 
+class CancellationOutcome(CareSyncModel):
+    event_id: str
+    contract_id: str
+    contract_status: ContractStatus
+    contract_version: int = Field(ge=1)
+    proposal: Optional[SupervisionProposal] = None
+    requires_guardian_action: bool
+    message: str
+    duplicate: bool = False
+
+
 class ApprovalType(str, Enum):
     GUARDIAN = "GUARDIAN"
     CAREGIVER = "CAREGIVER"
@@ -196,6 +224,13 @@ class Approval(CareSyncModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("timestamp must include a timezone")
         return value
+
+
+class ProposalDecisionResult(CareSyncModel):
+    approval: Approval
+    proposal: SupervisionProposal
+    replacement_contract: Optional[SupervisionContract] = None
+    invalidated_reason: Optional[str] = None
 
 
 class ChildEventType(str, Enum):
