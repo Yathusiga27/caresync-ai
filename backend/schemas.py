@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 
 from pydantic import Field, ValidationInfo, field_validator
 
@@ -58,3 +59,34 @@ class CaregiverAvailabilityCreate(CareSyncModel):
 
 class ApprovalDecisionRequest(CareSyncModel):
     actor_id: str = Field(min_length=1)
+
+
+class AgentChatRequest(CareSyncModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("message")
+    @classmethod
+    def message_must_contain_non_whitespace(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message must not be blank")
+        return value
+
+
+class AgentChatResponse(CareSyncModel):
+    reply: str
+    model: str
+    proposal: Optional["AgentReplacementSuggestion"] = None
+    proposal_validation_error: Optional[str] = None
+
+
+class AgentReplacementSuggestion(CareSyncModel):
+    contract_id: str
+    original_contract_version: int = Field(ge=1)
+    proposed_caregiver_id: str
+    reason: str = Field(min_length=1)
+
+
+class AgentModelAnswer(CareSyncModel):
+    reply: str = Field(min_length=1)
+    proposal: Optional[AgentReplacementSuggestion] = None

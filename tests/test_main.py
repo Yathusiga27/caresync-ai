@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -13,8 +14,10 @@ os.environ["CARESYNC_DATABASE_PATH"] = os.path.join(
 )
 os.environ["CARESYNC_ENV"] = "test"
 
+from backend.agent.agent import AgentUnavailableError
 from backend.main import app
 from backend.models.supervision import ContractStatus, DecisionStatus, SupervisionContract
+from backend.schemas import AgentChatResponse
 from backend.store import SQLiteStore, store
 
 
@@ -27,6 +30,43 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_agent_chat_endpoint_uses_agent_and_returns_model(self) -> None:
+        with patch("backend.main.agent") as mock_agent:
+            mock_agent.model = "qwen3:4b"
+            mock_agent.respond.return_value = AgentChatResponse(
+                reply="I can help review the schedule.", model="qwen3:4b"
+            )
+            response = self.client.post(
+                "/agent/chat",
+                json={"message": "Can you help me review the schedule?"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "reply": "I can help review the schedule.",
+                "model": "qwen3:4b",
+                "proposal": None,
+                "proposal_validation_error": None,
+            },
+        )
+
+    def test_agent_chat_returns_service_unavailable_when_ollama_is_offline(self) -> None:
+        with patch("backend.main.agent") as mock_agent:
+            mock_agent.respond.side_effect = AgentUnavailableError(
+                "Cannot connect to Ollama."
+            )
+            response = self.client.post("/agent/chat", json={"message": "Hello"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Cannot connect to Ollama", response.json()["detail"])
+
+    def test_agent_chat_rejects_blank_message(self) -> None:
+        response = self.client.post("/agent/chat", json={"message": "   "})
+
+        self.assertEqual(response.status_code, 422)
 
     def test_family_endpoints_return_fictional_fixture(self) -> None:
         family = self.client.get("/families/family-demo")

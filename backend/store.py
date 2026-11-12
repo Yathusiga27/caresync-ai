@@ -280,6 +280,88 @@ class SQLiteStore:
             ).fetchone()
         return FamilyMember.model_validate_json(row["payload"]) if row else None
 
+    def get_agent_contract_context(self, contract_id: str) -> dict:
+        contract = self.get_contract(contract_id)
+        if contract is None:
+            raise LookupError("Supervision contract not found")
+        return {
+            "id": contract.id,
+            "family_id": contract.family_id,
+            "child_id": contract.child_id,
+            "caregiver_id": contract.caregiver_id,
+            "activity": contract.activity,
+            "expected_location": contract.expected_location,
+            "start_time": contract.start_time.isoformat(),
+            "end_time": contract.end_time.isoformat(),
+            "status": contract.status,
+            "version": contract.version,
+        }
+
+    def list_available_caregivers_for_contract(self, contract_id: str) -> list[dict]:
+        with self._connection() as connection:
+            contract_row = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE id = ?",
+                (contract_id,),
+            ).fetchone()
+            if contract_row is None:
+                raise LookupError("Supervision contract not found")
+            contract = SupervisionContract.model_validate_json(contract_row["payload"])
+            return [
+                {"caregiver_id": member.id, "name": member.name}
+                for member in self._available_caregiver_members(connection, contract)
+            ]
+
+    def validate_replacement_candidate(
+        self,
+        contract_id: str,
+        proposed_caregiver_id: str,
+        original_contract_version: int,
+    ) -> dict:
+        with self._connection() as connection:
+            contract_row = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE id = ?",
+                (contract_id,),
+            ).fetchone()
+            if contract_row is None:
+                return {"valid": False, "reason": "Supervision contract was not found."}
+            contract = SupervisionContract.model_validate_json(contract_row["payload"])
+            if (
+                contract.status != ContractStatus.CONFLICTED
+                or contract.version != original_contract_version
+            ):
+                return {
+                    "valid": False,
+                    "reason": "The contract is no longer conflicted at the proposed version.",
+                }
+            caregiver_row = connection.execute(
+                "SELECT payload FROM family_members WHERE id = ?",
+                (proposed_caregiver_id,),
+            ).fetchone()
+            if caregiver_row is None:
+                return {"valid": False, "reason": "Proposed caregiver was not found."}
+            caregiver = FamilyMember.model_validate_json(caregiver_row["payload"])
+            if (
+                caregiver.family_id != contract.family_id
+                or caregiver.role != MemberRole.CAREGIVER
+                or caregiver.status != MemberStatus.ACTIVE
+                or caregiver.id == contract.caregiver_id
+            ):
+                return {
+                    "valid": False,
+                    "reason": "Proposed member is not an active alternative caregiver in this family.",
+                }
+            if not self._caregiver_available_for(
+                connection,
+                caregiver.id,
+                contract.start_time,
+                contract.end_time,
+            ):
+                return {
+                    "valid": False,
+                    "reason": "Proposed caregiver is not available for the full contract interval.",
+                }
+            return {"valid": True, "reason": "Proposal is valid for the current contract version."}
+
     def create_contract(self, contract: SupervisionContract) -> None:
         with self._connection() as connection:
             self._insert_contract(connection, contract)
@@ -648,6 +730,33 @@ class SQLiteStore:
             for window in windows
         )
 
+    def _available_caregiver_members(
+        self,
+        connection: sqlite3.Connection,
+        contract: SupervisionContract,
+    ) -> list[FamilyMember]:
+        rows = connection.execute(
+            """SELECT payload FROM family_members
+               WHERE family_id = ? ORDER BY id""",
+            (contract.family_id,),
+        ).fetchall()
+        available = []
+        for row in rows:
+            member = FamilyMember.model_validate_json(row["payload"])
+            if (
+                member.role == MemberRole.CAREGIVER
+                and member.status == MemberStatus.ACTIVE
+                and member.id != contract.caregiver_id
+                and self._caregiver_available_for(
+                    connection,
+                    member.id,
+                    contract.start_time,
+                    contract.end_time,
+                )
+            ):
+                available.append(member)
+        return available
+
     def confirm_handover(
         self,
         contract_id: str,
@@ -889,28 +998,12 @@ class SQLiteStore:
                 ):
                     continue
 
-                availability_rows = connection.execute(
-                    """SELECT payload FROM caregiver_availability
-                       WHERE caregiver_id = ?""",
-                    (member.id,),
-                ).fetchall()
-                windows = [
-                    CaregiverAvailability.model_validate_json(item["payload"])
-                    for item in availability_rows
-                ]
-                has_full_available_window = any(
-                    window.availability_status == AvailabilityStatus.AVAILABLE
-                    and window.start_time <= contract.start_time
-                    and window.end_time >= contract.end_time
-                    for window in windows
-                )
-                has_unavailable_overlap = any(
-                    window.availability_status == AvailabilityStatus.UNAVAILABLE
-                    and window.start_time < contract.end_time
-                    and window.end_time > contract.start_time
-                    for window in windows
-                )
-                if has_full_available_window and not has_unavailable_overlap:
+                if self._caregiver_available_for(
+                    connection,
+                    member.id,
+                    contract.start_time,
+                    contract.end_time,
+                ):
                     candidates.append(member)
 
             contract.version += 1
