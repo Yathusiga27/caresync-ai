@@ -3,7 +3,8 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from ollama import ResponseError
 
@@ -13,6 +14,16 @@ os.environ["CARESYNC_DATABASE_PATH"] = os.path.join(_test_database_directory.nam
 os.environ["CARESYNC_ENV"] = "test"
 
 from backend.agent.agent import AgentOutputError, AgentUnavailableError, CareSyncAgent
+from backend.models.supervision import (
+    AvailabilitySource,
+    AvailabilityStatus,
+    CaregiverAvailability,
+    CaregiverCancellationEvent,
+    ContractStatus,
+    DecisionStatus,
+    SupervisionContract,
+)
+from backend.store import store
 
 
 def response(content="", tool_calls=None):
@@ -41,6 +52,100 @@ class StubOllamaClient:
 
 
 class CareSyncAgentTests(unittest.TestCase):
+    def test_conflicted_contract_tools_produce_validated_alternative(self) -> None:
+        contract_id = f"contract-agent-{uuid4().hex}"
+        start_time = datetime(2027, 1, 10, 14, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        end_time = start_time + timedelta(hours=4)
+        contract = SupervisionContract(
+            id=contract_id,
+            family_id="family-demo",
+            child_id="child-demo",
+            caregiver_id="caregiver-demo",
+            activity="After-school care",
+            expected_location="Home",
+            start_time=start_time,
+            end_time=end_time,
+            status=ContractStatus.CONFIRMED,
+            approval_status=DecisionStatus.APPROVED,
+            acceptance_status=DecisionStatus.ACCEPTED,
+        )
+        store.create_contract(contract)
+        store.create_availability(
+            CaregiverAvailability(
+                id=f"availability-agent-{uuid4().hex}",
+                caregiver_id="caregiver-alt-demo",
+                start_time=start_time - timedelta(hours=1),
+                end_time=end_time + timedelta(hours=1),
+                availability_status=AvailabilityStatus.AVAILABLE,
+                source=AvailabilitySource.CAREGIVER,
+            )
+        )
+        store.process_caregiver_cancellation(
+            CaregiverCancellationEvent(
+                id=f"event-agent-{uuid4().hex}",
+                contract_id=contract_id,
+                caregiver_id="caregiver-demo",
+                occurred_at=datetime.now(timezone.utc),
+                reason="Unexpected appointment",
+            )
+        )
+
+        client = StubOllamaClient(
+            responses=[
+                response(
+                    tool_calls=[
+                        tool_call("get_supervision_contract", {"contract_id": contract_id}),
+                        tool_call("list_available_caregivers", {"contract_id": contract_id}),
+                    ]
+                ),
+                response(),
+                response(
+                    json.dumps(
+                        {
+                            "reply": "The alternate caregiver is available, pending human approval.",
+                            "proposal": {
+                                "contract_id": contract_id,
+                                "original_contract_version": 2,
+                                "proposed_caregiver_id": "caregiver-alt-demo",
+                                "reason": "Available for the full supervision interval.",
+                            },
+                        }
+                    )
+                ),
+            ]
+        )
+
+        answer = CareSyncAgent(client=client).respond(
+            f"Review contract {contract_id} and suggest an available replacement."
+        )
+
+        self.assertIsNotNone(answer.proposal)
+        self.assertEqual(answer.proposal.contract_id, contract_id)
+        self.assertEqual(answer.proposal.original_contract_version, 2)
+        self.assertEqual(answer.proposal.proposed_caregiver_id, "caregiver-alt-demo")
+        self.assertIsNone(answer.proposal_validation_error)
+        tool_messages = [
+            message
+            for message in client.requests[1]["messages"]
+            if isinstance(message, dict) and message.get("role") == "tool"
+        ]
+        contract_result = next(
+            json.loads(message["content"])
+            for message in tool_messages
+            if message["tool_name"] == "get_supervision_contract"
+        )
+        self.assertEqual(contract_result["contract"]["status"], "CONFLICTED")
+        self.assertEqual(contract_result["contract"]["version"], 2)
+        caregiver_result = next(
+            json.loads(message["content"])
+            for message in tool_messages
+            if message["tool_name"] == "list_available_caregivers"
+        )
+        self.assertIn(
+            {"caregiver_id": "caregiver-alt-demo", "name": "Demo Backup Caregiver"},
+            caregiver_result["caregivers"],
+        )
+
     def test_requests_tools_and_parses_structured_response(self) -> None:
         client = StubOllamaClient(
             responses=[
