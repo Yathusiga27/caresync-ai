@@ -1,41 +1,53 @@
 # CareSync AI
 
-An intelligent AI agent for child safety and family supervision coordination, powered by Ollama and WSO2 Agent Manager.
+CareSync AI is a family supervision coordination project. Its goal is to help parents and caregivers keep agreed supervision arrangements up to date when schedules or availability change.
 
-## Overview
+## Current implementation
 
-CareSync AI helps parents and caregivers coordinate child supervision when daily routines and schedules change unexpectedly.
+- FastAPI `GET /` and `GET /health` endpoints.
+- Typed models for families, family members, caregiver availability, supervision contracts and proposals, approvals, child events, and audit events.
+- `GET /families/{family_id}` and `GET /families/{family_id}/members`.
+- `POST /supervision/contracts`, `GET /supervision/contracts/{contract_id}`, `POST /supervision/contracts/{contract_id}/cancel`, and `GET /supervision/contracts/{contract_id}/proposals`.
+- Timezone-aware timestamps and basic contract/member validation.
 
-Unlike traditional child monitoring systems that simply track movement or send alerts, CareSync AI understands family context, identifies supervision gaps, proposes alternative arrangements, and coordinates caregiver handovers through human-approved decisions.
+The API persists families, members, and contracts in SQLite at `backend/data/caresync.db` by default. Set `CARESYNC_DATABASE_PATH` to use another database file. A fictional demo family is inserted when `CARESYNC_ENV` is `development` (the default) or `test`; set it to `production` to disable demo seeding. Proposal lifecycle and persistence behavior, approval workflows, agent interactions, Ollama, WSO2 Agent Manager, and ThunderID are planned work and are not implemented yet.
 
-## Key Features
+## Technology stack
 
-- **Intelligent Supervision Planning:** Detects gaps in supervision and proposes alternative caregiver arrangements.
-- **Supervision Contracts:** Maintains explicit, time-bound agreements for childcare responsibilities.
-- **Human-in-the-Loop Approval:** Requires caregiver confirmation and parental approval before activating critical changes.
-- **Context-Aware Safety:** Interprets movement events, missed check-ins, and unexpected changes.
-- **Local AI Inference:** Uses Ollama to run language models locally.
-- **Agent Observability and Evaluation:** Integrates WSO2 Agent Manager to monitor and evaluate agent behavior.
-- **Privacy and Security:** Designed with minimal data collection and fine-grained authorization.
+| Component | Technology | Status |
+|---|---|---|
+| AI model | Ollama / Qwen3 | Planned |
+| Agent framework | Python; LangGraph is under consideration for workflow orchestration | Python backend implemented; agent and LangGraph planned |
+| Backend API | FastAPI | Implemented |
+| Frontend | React / Tailwind CSS | Planned |
+| Database | SQLite | Implemented for families, members, and contracts; proposal persistence endpoints pending |
+| Agent management | WSO2 Agent Manager | Planned |
+| Identity management | ThunderID | Planned |
 
-## Technology Stack
+## Run locally
 
-| Component | Technology |
-|---|---|
-| AI Model | Ollama / Qwen3 |
-| Agent Framework | Python / LangGraph |
-| Backend | FastAPI |
-| Frontend | React / Tailwind CSS |
-| Database | SQLite |
-| Agent Management | WSO2 Agent Manager |
-| Identity Management | ThunderID |
+From the repository root, create and activate a virtual environment, then install the backend dependencies:
 
-## Project Status
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+```
 
-🚧 Under active development.
+Start the development server:
 
-The initial proof of concept focuses on resolving caregiver scheduling conflicts using intelligent planning and human approval.
+```bash
+uvicorn backend.main:app --reload
+```
+
+The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+
+## Run tests
+
+```bash
+python -m unittest discover -s tests
+```
 
 ## License
 
-MIT License.
+MIT. See [LICENSE](LICENSE).
