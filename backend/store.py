@@ -839,6 +839,28 @@ class SQLiteStore:
             )
         return contract
 
+    def escalate_overdue_handovers(self) -> None:
+        checked_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            candidates = connection.execute(
+                """SELECT id, start_time FROM supervision_contracts
+                   WHERE status = ?""",
+                (ContractStatus.CONFIRMED,),
+            ).fetchall()
+
+        for candidate in candidates:
+            # Stored timestamps can have different UTC offsets.
+            if datetime.fromisoformat(candidate["start_time"]) > checked_at:
+                continue
+            try:
+                self.check_handover_timeout(
+                    candidate["id"],
+                    correlation_id=f"handover-timeout-{uuid4().hex}",
+                )
+            except (WorkflowNotFound, WorkflowConflict):
+                # The contract may have changed since the candidate scan.
+                continue
+
     def check_handover_timeout(
         self,
         contract_id: str,

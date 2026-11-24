@@ -1,4 +1,9 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
+import os
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
@@ -26,10 +31,46 @@ from backend.schemas import (
 )
 from backend.store import CancellationConflict, WorkflowConflict, WorkflowNotFound, store
 
+logger = logging.getLogger(__name__)
+HANDOVER_SWEEP_INTERVAL_SECONDS = 30
+
+
+async def run_handover_scheduler(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(store.escalate_overdue_handovers)
+        except Exception:
+            logger.exception("Handover timeout sweep failed")
+
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=HANDOVER_SWEEP_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            continue
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if (
+        store.environment not in {"development", "dev"}
+        or os.getenv("CARESYNC_ENABLE_HANDOVER_SCHEDULER") != "1"
+    ):
+        yield
+        return
+
+    stop = asyncio.Event()
+    scheduler = asyncio.create_task(run_handover_scheduler(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        await scheduler
+
+
 app = FastAPI(
     title="CareSync AI",
     description="A family supervision coordination application.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 agent = CareSyncAgent()
 
