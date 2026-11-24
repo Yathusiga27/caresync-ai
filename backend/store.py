@@ -24,6 +24,7 @@ from backend.models.supervision import (
     Family,
     FamilyMember,
     GuardianNotification,
+    GuardianNotificationKind,
     SupervisionContract,
     SupervisionProposal,
     ProposalDecisionResult,
@@ -115,13 +116,18 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_contracts_family_id
                     ON supervision_contracts(family_id);
 
-                CREATE TABLE IF NOT EXISTS missed_handover_notifications (
+                CREATE TABLE IF NOT EXISTS guardian_notifications (
                     id TEXT PRIMARY KEY,
                     guardian_id TEXT NOT NULL REFERENCES family_members(id),
-                    contract_id TEXT NOT NULL UNIQUE REFERENCES supervision_contracts(id),
+                    contract_id TEXT NOT NULL REFERENCES supervision_contracts(id),
+                    kind TEXT NOT NULL,
                     message TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    UNIQUE (contract_id, kind)
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_guardian_notifications_inbox
+                    ON guardian_notifications(guardian_id, created_at DESC, id);
 
                 CREATE TABLE IF NOT EXISTS supervision_contract_versions (
                     contract_id TEXT NOT NULL REFERENCES supervision_contracts(id),
@@ -193,7 +199,26 @@ class SQLiteStore:
                     ON audit_events(resource_id, timestamp);
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
             self._migrate_audit_actor_ids(connection)
+            self._migrate_missed_handover_notifications(connection)
+
+    @staticmethod
+    def _migrate_missed_handover_notifications(connection: sqlite3.Connection) -> None:
+        legacy_table = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type = 'table' AND name = 'missed_handover_notifications'"""
+        ).fetchone()
+        if legacy_table is None:
+            return
+        connection.execute(
+            """INSERT INTO guardian_notifications
+               (id, guardian_id, contract_id, kind, message, created_at)
+               SELECT id, guardian_id, contract_id, ?, message, created_at
+               FROM missed_handover_notifications""",
+            (GuardianNotificationKind.MISSED_HANDOVER,),
+        )
+        connection.execute("DROP TABLE missed_handover_notifications")
 
     @staticmethod
     def _migrate_audit_actor_ids(connection: sqlite3.Connection) -> None:
@@ -913,11 +938,20 @@ class SQLiteStore:
                 connection, contract.family_id, "system", ActorType.SYSTEM,
                 "HANDOVER_TIMEOUT_ESCALATED", contract.id, correlation_id, checked_at,
             )
-            self._notify_handover_guardian(connection, contract, checked_at)
+            self._insert_guardian_notification(
+                connection,
+                contract,
+                GuardianNotificationKind.MISSED_HANDOVER,
+                "The scheduled handover has no confirmation. Please contact the assigned caregiver.",
+            )
         return contract
 
-    def _notify_handover_guardian(
-        self, connection: sqlite3.Connection, contract: SupervisionContract, checked_at: datetime
+    def _insert_guardian_notification(
+        self,
+        connection: sqlite3.Connection,
+        contract: SupervisionContract,
+        kind: GuardianNotificationKind,
+        message: str,
     ) -> None:
         # Prefer the replacement's approving guardian. Older contracts can lack
         # that link, so fall back to the family's usual guardian ordering.
@@ -939,19 +973,23 @@ class SQLiteStore:
         if guardian is None:
             return
         connection.execute(
-            """INSERT INTO missed_handover_notifications
-               (id, guardian_id, contract_id, message, created_at) VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO guardian_notifications
+               (id, guardian_id, contract_id, kind, message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (
-                f"notification-{uuid4().hex}", guardian["id"], contract.id,
-                "The scheduled handover has no confirmation. Please contact the assigned caregiver.",
-                checked_at.isoformat(),
+                f"notification-{uuid4().hex}",
+                guardian["id"],
+                contract.id,
+                kind,
+                message,
+                contract.updated_at.isoformat(),
             ),
         )
 
     def list_guardian_notifications(self, guardian_id: str) -> list[GuardianNotification]:
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT n.* FROM missed_handover_notifications AS n
+                """SELECT n.* FROM guardian_notifications AS n
                    JOIN supervision_contracts AS c ON c.id = n.contract_id
                    JOIN family_members AS m ON m.id = n.guardian_id AND m.family_id = c.family_id
                    WHERE n.guardian_id = ? AND m.role = 'GUARDIAN'
@@ -1177,6 +1215,13 @@ class SQLiteStore:
                 self._insert_audit_event(
                     connection, contract.family_id, "system", ActorType.SYSTEM,
                     "SUPERVISION_ESCALATED", contract.id, event.id, contract.updated_at,
+                )
+                self._insert_guardian_notification(
+                    connection,
+                    contract,
+                    GuardianNotificationKind.UNRESOLVED_CANCELLATION,
+                    "The assigned caregiver cancelled and no replacement was arranged. "
+                    "Please arrange supervision for the scheduled window.",
                 )
             else:
                 self._insert_audit_event(
