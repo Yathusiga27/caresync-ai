@@ -54,6 +54,10 @@ The API is available at `http://127.0.0.1:8000`; interactive API documentation i
 
 In local development, set `CARESYNC_ENABLE_HANDOVER_SCHEDULER=1` before starting the API to enable the background sweep. In PowerShell, use `$env:CARESYNC_ENABLE_HANDOVER_SCHEDULER = "1"`. The sweep checks at startup and every 30 seconds while the API is running. A confirmed contract with a pending handover is eligible for escalation as soon as its scheduled start time is reached. The escalation is recorded in SQLite. The manual timeout endpoint is available for explicit checks.
 
+### Guardian inbox for missed handovers
+
+In development and test environments, `GET /guardians/{guardian_id}/notifications` lists the selected demo guardian's notices, newest first. Both the scheduler and the manual timeout check persist the notice in the same transaction as the escalation. For replacement contracts the recipient is the approving guardian if still active. Otherwise the backend selects the first active family guardian by ID. If none exists, the contract still escalates. Each new missed-handover escalation produces at most one notice.
+
 ## Run tests
 
 ```bash

@@ -23,6 +23,7 @@ from backend.models.supervision import (
     MemberStatus,
     Family,
     FamilyMember,
+    GuardianNotification,
     SupervisionContract,
     SupervisionProposal,
     ProposalDecisionResult,
@@ -113,6 +114,14 @@ class SQLiteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_contracts_family_id
                     ON supervision_contracts(family_id);
+
+                CREATE TABLE IF NOT EXISTS missed_handover_notifications (
+                    id TEXT PRIMARY KEY,
+                    guardian_id TEXT NOT NULL REFERENCES family_members(id),
+                    contract_id TEXT NOT NULL UNIQUE REFERENCES supervision_contracts(id),
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS supervision_contract_versions (
                     contract_id TEXT NOT NULL REFERENCES supervision_contracts(id),
@@ -904,7 +913,53 @@ class SQLiteStore:
                 connection, contract.family_id, "system", ActorType.SYSTEM,
                 "HANDOVER_TIMEOUT_ESCALATED", contract.id, correlation_id, checked_at,
             )
+            self._notify_handover_guardian(connection, contract, checked_at)
         return contract
+
+    def _notify_handover_guardian(
+        self, connection: sqlite3.Connection, contract: SupervisionContract, checked_at: datetime
+    ) -> None:
+        # Prefer the replacement's approving guardian. Older contracts can lack
+        # that link, so fall back to the family's usual guardian ordering.
+        guardian = connection.execute(
+            """SELECT m.id FROM family_members AS m
+               WHERE m.family_id = ? AND m.role = 'GUARDIAN'
+                 AND COALESCE(json_extract(m.payload, '$.status'), 'ACTIVE') = 'ACTIVE'
+               ORDER BY EXISTS (
+                   SELECT 1 FROM audit_events AS e
+                   JOIN approvals AS a ON a.proposal_id = e.correlation_id
+                   WHERE e.resource_id = ?
+                     AND json_extract(e.payload, '$.action') = 'REPLACEMENT_CONFIRMED'
+                     AND a.approver_id = m.id AND a.approval_type = 'GUARDIAN'
+                     AND a.status = 'APPROVED'
+               ) DESC, m.id
+               LIMIT 1""",
+            (contract.family_id, contract.id),
+        ).fetchone()
+        if guardian is None:
+            return
+        connection.execute(
+            """INSERT INTO missed_handover_notifications
+               (id, guardian_id, contract_id, message, created_at) VALUES (?, ?, ?, ?, ?)""",
+            (
+                f"notification-{uuid4().hex}", guardian["id"], contract.id,
+                "The scheduled handover has no confirmation. Please contact the assigned caregiver.",
+                checked_at.isoformat(),
+            ),
+        )
+
+    def list_guardian_notifications(self, guardian_id: str) -> list[GuardianNotification]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT n.* FROM missed_handover_notifications AS n
+                   JOIN supervision_contracts AS c ON c.id = n.contract_id
+                   JOIN family_members AS m ON m.id = n.guardian_id AND m.family_id = c.family_id
+                   WHERE n.guardian_id = ? AND m.role = 'GUARDIAN'
+                     AND COALESCE(json_extract(m.payload, '$.status'), 'ACTIVE') = 'ACTIVE'
+                   ORDER BY n.created_at DESC, n.id""",
+                (guardian_id,),
+            ).fetchall()
+        return [GuardianNotification.model_validate(dict(row)) for row in rows]
 
     def _insert_audit_event(
         self,
