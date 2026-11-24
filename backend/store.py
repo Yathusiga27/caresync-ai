@@ -548,9 +548,16 @@ class SQLiteStore:
             raise WorkflowNotFound("Original supervision contract not found")
         contract = SupervisionContract.model_validate_json(contract_row["payload"])
 
-        approval.response_timestamp = datetime.now(timezone.utc)
+        responded_at = datetime.now(timezone.utc)
+        approval.response_timestamp = responded_at
         approval.status = decision
         self._save_approval(connection, approval)
+        approval_type = ApprovalType(approval.approval_type)
+        self._insert_audit_event(
+            connection, contract.family_id, actor_id, ActorType.USER,
+            f"{approval_type.value}_{decision.value}",
+            proposal.id, proposal.id, responded_at,
+        )
 
         if (
             contract.version != proposal.original_contract_version
@@ -575,6 +582,10 @@ class SQLiteStore:
             contract.updated_at = datetime.now(timezone.utc)
             self._save_contract(connection, contract)
             self._save_proposal(connection, proposal)
+            self._insert_audit_event(
+                connection, contract.family_id, "system", ActorType.SYSTEM,
+                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
+            )
             return ProposalDecisionResult(approval=approval, proposal=proposal)
 
         approval_rows = connection.execute(
@@ -643,6 +654,10 @@ class SQLiteStore:
             self._insert_contract(connection, replacement)
             proposal.status = ProposalStatus.CONFIRMED
             self._save_proposal(connection, proposal)
+            self._insert_audit_event(
+                connection, contract.family_id, "system", ActorType.SYSTEM,
+                "REPLACEMENT_CONFIRMED", replacement.id, proposal.id, replacement.created_at,
+            )
             return ProposalDecisionResult(
                 approval=approval,
                 proposal=proposal,
@@ -681,7 +696,15 @@ class SQLiteStore:
             contract.version += 1
             contract.updated_at = datetime.now(timezone.utc)
             self._save_contract(connection, contract)
+            self._insert_audit_event(
+                connection, contract.family_id, "system", ActorType.SYSTEM,
+                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
+            )
         self._save_proposal(connection, proposal)
+        self._insert_audit_event(
+            connection, contract.family_id, "system", ActorType.SYSTEM,
+            "PROPOSAL_INVALIDATED", proposal.id, proposal.id, datetime.now(timezone.utc),
+        )
         return ProposalDecisionResult(
             approval=current_approval,
             proposal=proposal,
@@ -810,29 +833,9 @@ class SQLiteStore:
             if not self._save_contract(connection, contract):
                 raise WorkflowNotFound("Supervision contract not found")
 
-            audit_event = AuditEvent(
-                id=f"audit-{uuid4().hex}",
-                family_id=contract.family_id,
-                actor_id=actor_id,
-                actor_type=ActorType.USER,
-                action="HANDOVER_CONFIRMED",
-                resource_id=contract.id,
-                timestamp=confirmed_at,
-                correlation_id=correlation_id,
-            )
-            connection.execute(
-                """INSERT INTO audit_events
-                   (id, family_id, actor_id, resource_id, timestamp, correlation_id, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    audit_event.id,
-                    audit_event.family_id,
-                    audit_event.actor_id,
-                    audit_event.resource_id,
-                    audit_event.timestamp.isoformat(),
-                    audit_event.correlation_id,
-                    audit_event.model_dump_json(),
-                ),
+            self._insert_audit_event(
+                connection, contract.family_id, actor_id, ActorType.USER,
+                "HANDOVER_CONFIRMED", contract.id, correlation_id, confirmed_at,
             )
         return contract
 
@@ -875,31 +878,42 @@ class SQLiteStore:
             if not self._save_contract(connection, contract):
                 raise WorkflowNotFound("Supervision contract not found")
 
-            audit_event = AuditEvent(
-                id=f"audit-{uuid4().hex}",
-                family_id=contract.family_id,
-                actor_id="system",
-                actor_type=ActorType.SYSTEM,
-                action="HANDOVER_TIMEOUT_ESCALATED",
-                resource_id=contract.id,
-                timestamp=checked_at,
-                correlation_id=correlation_id,
-            )
-            connection.execute(
-                """INSERT INTO audit_events
-                   (id, family_id, actor_id, resource_id, timestamp, correlation_id, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    audit_event.id,
-                    audit_event.family_id,
-                    audit_event.actor_id,
-                    audit_event.resource_id,
-                    audit_event.timestamp.isoformat(),
-                    audit_event.correlation_id,
-                    audit_event.model_dump_json(),
-                ),
+            self._insert_audit_event(
+                connection, contract.family_id, "system", ActorType.SYSTEM,
+                "HANDOVER_TIMEOUT_ESCALATED", contract.id, correlation_id, checked_at,
             )
         return contract
+
+    def _insert_audit_event(
+        self,
+        connection: sqlite3.Connection,
+        family_id: str,
+        actor_id: str,
+        actor_type: ActorType,
+        action: str,
+        resource_id: str,
+        correlation_id: str,
+        timestamp: datetime,
+    ) -> None:
+        event = AuditEvent(
+            id=f"audit-{uuid4().hex}",
+            family_id=family_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            action=action,
+            resource_id=resource_id,
+            correlation_id=correlation_id,
+            timestamp=timestamp,
+        )
+        connection.execute(
+            """INSERT INTO audit_events
+               (id, family_id, actor_id, resource_id, timestamp, correlation_id, payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event.id, event.family_id, event.actor_id, event.resource_id,
+                event.timestamp.isoformat(), event.correlation_id, event.model_dump_json(),
+            ),
+        )
 
     def list_audit_events(self, resource_id: str) -> list[AuditEvent]:
         with self._connection() as connection:
@@ -1078,6 +1092,20 @@ class SQLiteStore:
                 requires_guardian_action=True,
                 message=message,
             )
+            self._insert_audit_event(
+                connection, contract.family_id, event.caregiver_id, ActorType.USER,
+                "CAREGIVER_CANCELLATION_RECORDED", contract.id, event.id, contract.updated_at,
+            )
+            if proposal is None:
+                self._insert_audit_event(
+                    connection, contract.family_id, "system", ActorType.SYSTEM,
+                    "SUPERVISION_ESCALATED", contract.id, event.id, contract.updated_at,
+                )
+            else:
+                self._insert_audit_event(
+                    connection, contract.family_id, "system", ActorType.SYSTEM,
+                    "PROPOSAL_CREATED", proposal.id, event.id, proposal.created_at,
+                )
             connection.execute(
                 """INSERT INTO caregiver_cancellation_events
                    (id, contract_id, caregiver_id, payload, result_payload)
