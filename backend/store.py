@@ -606,20 +606,14 @@ class SQLiteStore:
             )
 
         if decision in {DecisionStatus.REJECTED, DecisionStatus.DECLINED}:
-            proposal.status = (
-                ProposalStatus.REJECTED
-                if decision == DecisionStatus.REJECTED
-                else ProposalStatus.DECLINED
-            )
-            contract.status = ContractStatus.ESCALATED
-            contract.version += 1
-            contract.updated_at = datetime.now(timezone.utc)
-            self._save_contract(connection, contract)
+            if decision == DecisionStatus.REJECTED:
+                proposal.status = ProposalStatus.REJECTED
+                reason = "The guardian rejected the replacement proposal."
+            else:
+                proposal.status = ProposalStatus.DECLINED
+                reason = "The proposed caregiver declined the replacement proposal."
             self._save_proposal(connection, proposal)
-            self._insert_audit_event(
-                connection, contract.family_id, "system", ActorType.SYSTEM,
-                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
-            )
+            self._escalate_failed_proposal(connection, contract, proposal, reason)
             return ProposalDecisionResult(approval=approval, proposal=proposal)
 
         approval_rows = connection.execute(
@@ -726,14 +720,7 @@ class SQLiteStore:
             ContractStatus.CANCELLED,
             ContractStatus.COMPLETED,
         }:
-            contract.status = ContractStatus.ESCALATED
-            contract.version += 1
-            contract.updated_at = datetime.now(timezone.utc)
-            self._save_contract(connection, contract)
-            self._insert_audit_event(
-                connection, contract.family_id, "system", ActorType.SYSTEM,
-                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
-            )
+            self._escalate_failed_proposal(connection, contract, proposal, reason)
         self._save_proposal(connection, proposal)
         self._insert_audit_event(
             connection, contract.family_id, "system", ActorType.SYSTEM,
@@ -743,6 +730,29 @@ class SQLiteStore:
             approval=current_approval,
             proposal=proposal,
             invalidated_reason=reason,
+        )
+
+    def _escalate_failed_proposal(
+        self,
+        connection: sqlite3.Connection,
+        contract: SupervisionContract,
+        proposal: SupervisionProposal,
+        reason: str,
+    ) -> None:
+        contract.status = ContractStatus.ESCALATED
+        contract.version += 1
+        contract.updated_at = datetime.now(timezone.utc)
+        self._save_contract(connection, contract)
+        self._insert_audit_event(
+            connection, contract.family_id, "system", ActorType.SYSTEM,
+            "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
+        )
+        self._insert_guardian_notification(
+            connection,
+            contract,
+            GuardianNotificationKind.REPLACEMENT_PROPOSAL_FAILED,
+            f"{reason} Please arrange supervision for the scheduled window.",
+            proposal_id=proposal.id,
         )
 
     def _save_approval(self, connection: sqlite3.Connection, approval: Approval) -> None:
@@ -952,14 +962,20 @@ class SQLiteStore:
         contract: SupervisionContract,
         kind: GuardianNotificationKind,
         message: str,
+        *,
+        proposal_id: Optional[str] = None,
     ) -> None:
-        # Prefer the replacement's approving guardian. Older contracts can lack
-        # that link, so fall back to the family's usual guardian ordering.
+        # Prefer the failed proposal's assigned guardian, then the guardian who
+        # approved the contract if it was itself a replacement.
         guardian = connection.execute(
             """SELECT m.id FROM family_members AS m
                WHERE m.family_id = ? AND m.role = 'GUARDIAN'
                  AND COALESCE(json_extract(m.payload, '$.status'), 'ACTIVE') = 'ACTIVE'
                ORDER BY EXISTS (
+                   SELECT 1 FROM approvals AS a
+                   WHERE a.proposal_id = ? AND a.approver_id = m.id
+                     AND a.approval_type = 'GUARDIAN'
+               ) DESC, EXISTS (
                    SELECT 1 FROM audit_events AS e
                    JOIN approvals AS a ON a.proposal_id = e.correlation_id
                    WHERE e.resource_id = ?
@@ -968,7 +984,7 @@ class SQLiteStore:
                      AND a.status = 'APPROVED'
                ) DESC, m.id
                LIMIT 1""",
-            (contract.family_id, contract.id),
+            (contract.family_id, proposal_id, contract.id),
         ).fetchone()
         if guardian is None:
             return

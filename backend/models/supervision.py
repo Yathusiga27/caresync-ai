@@ -274,6 +274,7 @@ class ActorType(str, Enum):
 class GuardianNotificationKind(str, Enum):
     MISSED_HANDOVER = "MISSED_HANDOVER"
     UNRESOLVED_CANCELLATION = "UNRESOLVED_CANCELLATION"
+    REPLACEMENT_PROPOSAL_FAILED = "REPLACEMENT_PROPOSAL_FAILED"
 
 
 class GuardianNotification(CareSyncModel):

@@ -56,9 +56,13 @@ In local development, set `CARESYNC_ENABLE_HANDOVER_SCHEDULER=1` before starting
 
 ### Guardian inbox for supervision escalations
 
-In development and test environments, `GET /guardians/{guardian_id}/notifications` lists the selected demo guardian's notices, newest first. The `kind` field is `MISSED_HANDOVER` for an escalated handover timeout or `UNRESOLVED_CANCELLATION` when a cancellation escalates without a replacement proposal. The backend saves the notice in the same SQLite transaction as the escalation. Retrying either workflow preserves the original notice.
+In development and test environments, `GET /guardians/{guardian_id}/notifications` lists the selected demo guardian's notices, newest first. The `kind` field identifies the cause of the escalation.
 
-For replacement contracts, the recipient is the approving guardian if still active. Otherwise the backend selects the first active family guardian by ID. If none exists, the contract still escalates. Existing missed-handover notices are migrated automatically.
+- `MISSED_HANDOVER` for an escalated handover timeout.
+- `UNRESOLVED_CANCELLATION` when a cancellation escalates without a replacement proposal.
+- `REPLACEMENT_PROPOSAL_FAILED` when rejection, decline, or invalidation of a replacement proposal escalates the contract.
+
+The backend saves the notice in the same SQLite transaction as the escalation. Retrying the workflow preserves the original notice. A failed proposal goes to its assigned guardian if still active. When the contract itself was a replacement, the backend next prefers the guardian who approved it. Otherwise it selects the first active family guardian by ID. If none exists, the contract still escalates. Existing missed-handover notices are migrated automatically.
 
 ## Run tests
 

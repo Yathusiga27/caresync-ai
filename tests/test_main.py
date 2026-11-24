@@ -511,13 +511,39 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
 
+    def _assert_failed_proposal_notice(self, contract_id: str, reason: str) -> None:
+        inbox = self.client.get("/guardians/guardian-demo/notifications")
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        notices = [notice for notice in inbox.json() if notice["contract_id"] == contract_id]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["kind"], "REPLACEMENT_PROPOSAL_FAILED")
+        self.assertEqual(
+            notices[0]["message"],
+            f"{reason} Please arrange supervision for the scheduled window.",
+        )
+
+    def test_guardian_rejection_escalates_contract_and_notifies_guardian(self) -> None:
+        contract, proposal = self._make_proposal("08-05", "event-reject-001")
+        guardian_approval = self._approval_for(proposal["id"], "GUARDIAN")
+        endpoint = f"/approvals/{guardian_approval['id']}/reject"
+        payload = {"actor_id": "guardian-demo"}
+
+        rejected = self.client.post(endpoint, json=payload)
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["proposal"]["status"], "REJECTED")
+        self.assertEqual(store.get_contract(contract["id"]).status, "ESCALATED")
+
+        self.assertEqual(self.client.post(endpoint, json=payload).status_code, 409)
+        self._assert_failed_proposal_notice(
+            contract["id"], "The guardian rejected the replacement proposal."
+        )
+
     def test_caregiver_decline_escalates_contract(self) -> None:
         contract, proposal = self._make_proposal("08-10", "event-decline-001")
+        endpoint = f"/proposals/{proposal['id']}/decline"
+        payload = {"actor_id": "caregiver-alt-demo"}
 
-        declined = self.client.post(
-            f"/proposals/{proposal['id']}/decline",
-            json={"actor_id": "caregiver-alt-demo"},
-        )
+        declined = self.client.post(endpoint, json=payload)
 
         self.assertEqual(declined.status_code, 200, declined.text)
         self.assertEqual(declined.json()["proposal"]["status"], "DECLINED")
@@ -534,6 +560,10 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(
             self.client.get(f"/supervision/contracts/{contract['id']}").json()["status"],
             "ESCALATED",
+        )
+        self.assertEqual(self.client.post(endpoint, json=payload).status_code, 409)
+        self._assert_failed_proposal_notice(
+            contract["id"], "The proposed caregiver declined the replacement proposal."
         )
 
     def test_stale_proposal_is_invalidated_instead_of_approved(self) -> None:
@@ -558,6 +588,26 @@ class HealthEndpointTests(unittest.TestCase):
             f"/supervision/contracts/{contract['id']}/proposals"
         ).json()
         self.assertEqual(proposals[0]["status"], "INVALIDATED")
+        self._assert_failed_proposal_notice(
+            contract["id"], "The original contract changed after this proposal was created."
+        )
+
+    def test_invalidated_proposal_for_cancelled_contract_does_not_send_notice(self) -> None:
+        contract, proposal = self._make_proposal("09-15", "event-cancelled-original-001")
+        guardian_approval = self._approval_for(proposal["id"], "GUARDIAN")
+        cancelled = self.client.post(f"/supervision/contracts/{contract['id']}/cancel")
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+
+        response = self.client.post(
+            f"/approvals/{guardian_approval['id']}/approve",
+            json={"actor_id": "guardian-demo"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(store.list_proposals(contract["id"])[0].status, "INVALIDATED")
+        self.assertEqual(store.get_contract(contract["id"]).status, "CANCELLED")
+        notices = store.list_guardian_notifications("guardian-demo")
+        self.assertFalse(any(notice.contract_id == contract["id"] for notice in notices))
 
     def test_availability_change_invalidates_before_confirmation(self) -> None:
         _, proposal = self._make_proposal("10-10", "event-availability-changed-001")
@@ -591,6 +641,10 @@ class HealthEndpointTests(unittest.TestCase):
         ).json()
         self.assertEqual(proposals[0]["status"], "INVALIDATED")
         self.assertIsNone(response.json().get("replacement_contract"))
+        self._assert_failed_proposal_notice(
+            proposal["original_contract_id"],
+            "The proposed caregiver is no longer available for the full interval.",
+        )
 
     def test_assigned_caregiver_confirms_handover_and_contract_becomes_active(self) -> None:
         contract = self._make_handover_contract()
