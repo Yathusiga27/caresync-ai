@@ -1,7 +1,9 @@
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -18,7 +20,7 @@ from backend.agent.agent import AgentUnavailableError
 from backend.main import app
 from backend.models.supervision import ContractStatus, DecisionStatus, SupervisionContract
 from backend.schemas import AgentChatResponse
-from backend.store import SQLiteStore, store
+from backend.store import SQLiteStore, WorkflowConflict, store
 
 
 class HealthEndpointTests(unittest.TestCase):
@@ -144,8 +146,11 @@ class HealthEndpointTests(unittest.TestCase):
         status: ContractStatus = ContractStatus.CONFIRMED,
         start_offset: timedelta = timedelta(minutes=-10),
         end_offset: timedelta = timedelta(minutes=10),
+        *,
+        database: SQLiteStore = store,
+        time_zone: timezone = timezone.utc,
     ) -> SupervisionContract:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(time_zone)
         contract = SupervisionContract(
             id=f"contract-handover-{uuid4().hex}",
             family_id="family-demo",
@@ -159,8 +164,71 @@ class HealthEndpointTests(unittest.TestCase):
             approval_status=DecisionStatus.APPROVED,
             acceptance_status=DecisionStatus.ACCEPTED,
         )
-        store.create_contract(contract)
+        database.create_contract(contract)
         return contract
+
+    def test_scheduler_escalates_overdue_pending_handover_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = SQLiteStore(os.path.join(directory, "scheduler.db"), environment="test")
+            overdue = self._make_handover_contract(
+                database=database, time_zone=timezone(timedelta(hours=5, minutes=30))
+            )
+            future = self._make_handover_contract(
+                start_offset=timedelta(hours=1), end_offset=timedelta(hours=2),
+                database=database, time_zone=timezone(timedelta(hours=-5)),
+            )
+            active = self._make_handover_contract(database=database)
+            database.confirm_handover(active.id, active.caregiver_id, "test-handover")
+
+            database.escalate_overdue_handovers()
+            database.escalate_overdue_handovers()
+
+            self.assertEqual(database.get_contract(overdue.id).status, "ESCALATED")
+            self.assertEqual(database.get_contract(overdue.id).version, 2)
+            self.assertEqual(
+                [event.action for event in database.list_audit_events(overdue.id)],
+                ["HANDOVER_TIMEOUT_ESCALATED"],
+            )
+            self.assertEqual(database.get_contract(future.id).status, "CONFIRMED")
+            self.assertEqual(database.list_audit_events(future.id), [])
+            self.assertEqual(database.get_contract(active.id).status, "ACTIVE")
+            self.assertEqual(
+                [event.action for event in database.list_audit_events(active.id)],
+                ["HANDOVER_CONFIRMED"],
+            )
+
+    def test_scheduler_and_caregiver_confirmation_record_only_one_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = SQLiteStore(os.path.join(directory, "scheduler.db"), environment="test")
+            contract = self._make_handover_contract(database=database)
+            start = Barrier(2, timeout=5)
+
+            def sweep() -> None:
+                start.wait()
+                database.escalate_overdue_handovers()
+
+            def confirm() -> bool:
+                start.wait()
+                try:
+                    database.confirm_handover(contract.id, contract.caregiver_id, "race")
+                except WorkflowConflict:
+                    return False
+                return True
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                sweep_result = executor.submit(sweep)
+                confirmation_result = executor.submit(confirm)
+                sweep_result.result()
+                confirmed = confirmation_result.result()
+
+            current = database.get_contract(contract.id)
+            self.assertEqual(current.version, 2)
+            self.assertEqual(current.status, "ACTIVE" if confirmed else "ESCALATED")
+            expected_action = "HANDOVER_CONFIRMED" if confirmed else "HANDOVER_TIMEOUT_ESCALATED"
+            self.assertEqual(
+                [event.action for event in database.list_audit_events(contract.id)],
+                [expected_action],
+            )
 
     def test_contract_is_created_pending_approval_and_can_be_cancelled(self) -> None:
         response = self.client.post(

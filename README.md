@@ -16,7 +16,7 @@ CareSync AI is a family supervision coordination project. Its goal is to help pa
 - `POST /supervision/contracts/{contract_id}/check-handover-timeout` escalates a confirmed contract with no handover once its scheduled start time is reached. Repeated checks are safe.
 - Timezone-aware timestamps and basic contract/member validation.
 
-The API persists families, members, caregiver availability, contracts, proposals, approval responses, cancellation events, and audit events in SQLite at `backend/data/caresync.db` by default. Set `CARESYNC_DATABASE_PATH` to use another database file. A fictional demo family is inserted when `CARESYNC_ENV` is `development` (the default) or `test`; set it to `production` to disable demo seeding. Approval, handover, timeout, and chat context access are enabled only in development and test environments until authentication and a trusted scheduler are configured. Actor IDs are local demo checks, not authentication. The timeout check must currently be invoked explicitly; there is no background scheduler yet. Live chat requires Ollama and the configured model to be available.
+The API persists families, members, caregiver availability, contracts, proposals, approval responses, cancellation events, and audit events in SQLite at `backend/data/caresync.db` by default. Set `CARESYNC_DATABASE_PATH` to use another database file. A fictional demo family is inserted when `CARESYNC_ENV` is `development` (the default) or `test`; set it to `production` to disable demo seeding. Approval, handover, timeout, and chat context access are enabled only in development and test environments. Actor IDs are local demo checks, not authentication. Live chat requires Ollama and the configured model to be available.
 
 ## Technology stack
 
@@ -49,6 +49,10 @@ uvicorn backend.main:app --reload
 The chat service defaults to `http://127.0.0.1:11434` and model `qwen3:4b`. Override these before starting the server with `CARESYNC_OLLAMA_HOST` and `CARESYNC_OLLAMA_MODEL`. The selected model must already be installed in Ollama; the app does not download models automatically.
 
 The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+
+### Automatic handover escalation
+
+In local development, set `CARESYNC_ENABLE_HANDOVER_SCHEDULER=1` before starting the API to enable the background sweep. In PowerShell, use `$env:CARESYNC_ENABLE_HANDOVER_SCHEDULER = "1"`. The sweep checks at startup and every 30 seconds while the API is running. A confirmed contract with a pending handover is eligible for escalation as soon as its scheduled start time is reached. The escalation is recorded in SQLite. The manual timeout endpoint is available for explicit checks.
 
 ## Run tests
 
