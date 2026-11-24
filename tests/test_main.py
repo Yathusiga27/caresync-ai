@@ -272,6 +272,17 @@ class HealthEndpointTests(unittest.TestCase):
             f"/supervision/contracts/{contract['id']}/proposals"
         )
         self.assertEqual(len(proposals.json()), 1)
+        cancellation_events = store.list_audit_events(contract["id"])
+        self.assertEqual(
+            [(event.action, event.actor_id, event.correlation_id)
+             for event in cancellation_events],
+            [("CAREGIVER_CANCELLATION_RECORDED", "caregiver-demo", first["event_id"])],
+        )
+        proposal_events = store.list_audit_events(first["proposal"]["id"])
+        self.assertEqual(
+            [(event.action, event.correlation_id) for event in proposal_events],
+            [("PROPOSAL_CREATED", first["event_id"])],
+        )
 
     def test_cancellation_escalates_when_alternative_is_unavailable(self) -> None:
         contract = self._create_contract(
@@ -363,6 +374,20 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(replacement["approval_status"], "APPROVED")
         self.assertEqual(replacement["acceptance_status"], "ACCEPTED")
         self.assertEqual(replacement["caregiver_id"], "caregiver-alt-demo")
+        self.assertCountEqual(
+            [(event.action, event.actor_id)
+             for event in store.list_audit_events(proposal["id"])],
+            [
+                ("PROPOSAL_CREATED", "system"),
+                ("CAREGIVER_ACCEPTED", "caregiver-alt-demo"),
+                ("GUARDIAN_APPROVED", "guardian-demo"),
+            ],
+        )
+        self.assertEqual(
+            [(event.action, event.correlation_id)
+             for event in store.list_audit_events(replacement["id"])],
+            [("REPLACEMENT_CONFIRMED", proposal["id"])],
+        )
         self.assertEqual(
             self.client.get(f"/supervision/contracts/{contract['id']}").json()["status"],
             "CONFLICTED",
@@ -409,6 +434,16 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(declined.status_code, 200, declined.text)
         self.assertEqual(declined.json()["proposal"]["status"], "DECLINED")
+        self.assertIn(
+            ("CAREGIVER_DECLINED", "caregiver-alt-demo"),
+            [(event.action, event.actor_id)
+             for event in store.list_audit_events(proposal["id"])],
+        )
+        self.assertIn(
+            ("SUPERVISION_ESCALATED", proposal["id"]),
+            [(event.action, event.correlation_id)
+             for event in store.list_audit_events(contract["id"])],
+        )
         self.assertEqual(
             self.client.get(f"/supervision/contracts/{contract['id']}").json()["status"],
             "ESCALATED",
