@@ -24,6 +24,8 @@ from backend.models.supervision import ContractStatus, DecisionStatus, Supervisi
 from backend.schemas import AgentChatResponse
 from backend.store import SQLiteStore, WorkflowConflict, store
 
+FUTURE_SCHEDULE_YEAR = datetime.now(timezone.utc).year + 1
+
 
 class HealthEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -127,14 +129,15 @@ class HealthEndpointTests(unittest.TestCase):
         return matches[0]
 
     def _make_proposal(self, day: str, event_id: str) -> tuple[dict, dict]:
+        schedule_day = f"{FUTURE_SCHEDULE_YEAR}-{day}"
         contract = self._create_contract(
-            f"2027-{day}T14:00:00+05:30", f"2027-{day}T18:00:00+05:30"
+            f"{schedule_day}T14:00:00+05:30", f"{schedule_day}T18:00:00+05:30"
         )
         availability = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": f"2027-{day}T13:00:00+05:30",
-                "end_time": f"2027-{day}T19:00:00+05:30",
+                "start_time": f"{schedule_day}T13:00:00+05:30",
+                "end_time": f"{schedule_day}T19:00:00+05:30",
                 "availability_status": "AVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -317,14 +320,15 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertIn(response.json()["id"], {record.id for record in records})
 
     def test_cancellation_proposes_caregiver_available_for_full_window(self) -> None:
+        day = f"{FUTURE_SCHEDULE_YEAR}-01-10"
         contract = self._create_contract(
-            "2027-01-10T14:00:00+05:30", "2027-01-10T18:00:00+05:30"
+            f"{day}T14:00:00+05:30", f"{day}T18:00:00+05:30"
         )
         availability = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": "2027-01-10T13:00:00+05:30",
-                "end_time": "2027-01-10T19:00:00+05:30",
+                "start_time": f"{day}T13:00:00+05:30",
+                "end_time": f"{day}T19:00:00+05:30",
                 "availability_status": "AVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -363,14 +367,15 @@ class HealthEndpointTests(unittest.TestCase):
         )
 
     def test_cancellation_escalates_when_alternative_is_unavailable(self) -> None:
+        day = f"{FUTURE_SCHEDULE_YEAR}-02-10"
         contract = self._create_contract(
-            "2027-02-10T14:00:00+05:30", "2027-02-10T18:00:00+05:30"
+            f"{day}T14:00:00+05:30", f"{day}T18:00:00+05:30"
         )
         available = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": "2027-02-10T13:00:00+05:30",
-                "end_time": "2027-02-10T19:00:00+05:30",
+                "start_time": f"{day}T13:00:00+05:30",
+                "end_time": f"{day}T19:00:00+05:30",
                 "availability_status": "AVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -379,8 +384,8 @@ class HealthEndpointTests(unittest.TestCase):
         unavailable = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": "2027-02-10T15:00:00+05:30",
-                "end_time": "2027-02-10T17:00:00+05:30",
+                "start_time": f"{day}T15:00:00+05:30",
+                "end_time": f"{day}T17:00:00+05:30",
                 "availability_status": "UNAVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -394,8 +399,9 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertTrue(outcome["requires_guardian_action"])
 
     def test_cancellation_escalates_when_no_availability_is_recorded(self) -> None:
+        day = f"{FUTURE_SCHEDULE_YEAR}-03-10"
         contract = self._create_contract(
-            "2027-03-10T14:00:00+05:30", "2027-03-10T18:00:00+05:30"
+            f"{day}T14:00:00+05:30", f"{day}T18:00:00+05:30"
         )
 
         outcome = self._submit_cancellation(contract["id"], "event-no-alt-001")
@@ -413,14 +419,15 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(notices[0]["kind"], "UNRESOLVED_CANCELLATION")
 
     def test_duplicate_cancellation_event_does_not_create_another_proposal(self) -> None:
+        day = f"{FUTURE_SCHEDULE_YEAR}-05-10"
         contract = self._create_contract(
-            "2027-05-10T14:00:00+05:30", "2027-05-10T18:00:00+05:30"
+            f"{day}T14:00:00+05:30", f"{day}T18:00:00+05:30"
         )
         availability = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": "2027-05-10T13:00:00+05:30",
-                "end_time": "2027-05-10T19:00:00+05:30",
+                "start_time": f"{day}T13:00:00+05:30",
+                "end_time": f"{day}T19:00:00+05:30",
                 "availability_status": "AVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -511,13 +518,39 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
 
+    def _assert_failed_proposal_notice(self, contract_id: str, reason: str) -> None:
+        inbox = self.client.get("/guardians/guardian-demo/notifications")
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        notices = [notice for notice in inbox.json() if notice["contract_id"] == contract_id]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["kind"], "REPLACEMENT_PROPOSAL_FAILED")
+        self.assertEqual(
+            notices[0]["message"],
+            f"{reason} Please arrange supervision for the scheduled window.",
+        )
+
+    def test_guardian_rejection_escalates_contract_and_notifies_guardian(self) -> None:
+        contract, proposal = self._make_proposal("08-05", "event-reject-001")
+        guardian_approval = self._approval_for(proposal["id"], "GUARDIAN")
+        endpoint = f"/approvals/{guardian_approval['id']}/reject"
+        payload = {"actor_id": "guardian-demo"}
+
+        rejected = self.client.post(endpoint, json=payload)
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["proposal"]["status"], "REJECTED")
+        self.assertEqual(store.get_contract(contract["id"]).status, "ESCALATED")
+
+        self.assertEqual(self.client.post(endpoint, json=payload).status_code, 409)
+        self._assert_failed_proposal_notice(
+            contract["id"], "The guardian rejected the replacement proposal."
+        )
+
     def test_caregiver_decline_escalates_contract(self) -> None:
         contract, proposal = self._make_proposal("08-10", "event-decline-001")
+        endpoint = f"/proposals/{proposal['id']}/decline"
+        payload = {"actor_id": "caregiver-alt-demo"}
 
-        declined = self.client.post(
-            f"/proposals/{proposal['id']}/decline",
-            json={"actor_id": "caregiver-alt-demo"},
-        )
+        declined = self.client.post(endpoint, json=payload)
 
         self.assertEqual(declined.status_code, 200, declined.text)
         self.assertEqual(declined.json()["proposal"]["status"], "DECLINED")
@@ -535,13 +568,17 @@ class HealthEndpointTests(unittest.TestCase):
             self.client.get(f"/supervision/contracts/{contract['id']}").json()["status"],
             "ESCALATED",
         )
+        self.assertEqual(self.client.post(endpoint, json=payload).status_code, 409)
+        self._assert_failed_proposal_notice(
+            contract["id"], "The proposed caregiver declined the replacement proposal."
+        )
 
     def test_stale_proposal_is_invalidated_instead_of_approved(self) -> None:
         contract, proposal = self._make_proposal("09-10", "event-stale-001")
         guardian_approval = self._approval_for(proposal["id"], "GUARDIAN")
         original = store.get_contract(contract["id"])
         original.version += 1
-        original.updated_at = original.updated_at.replace(year=2028)
+        original.updated_at += timedelta(seconds=1)
         store.save_contract(original)
 
         response = self.client.post(
@@ -558,6 +595,26 @@ class HealthEndpointTests(unittest.TestCase):
             f"/supervision/contracts/{contract['id']}/proposals"
         ).json()
         self.assertEqual(proposals[0]["status"], "INVALIDATED")
+        self._assert_failed_proposal_notice(
+            contract["id"], "The original contract changed after this proposal was created."
+        )
+
+    def test_invalidated_proposal_for_cancelled_contract_does_not_send_notice(self) -> None:
+        contract, proposal = self._make_proposal("09-15", "event-cancelled-original-001")
+        guardian_approval = self._approval_for(proposal["id"], "GUARDIAN")
+        cancelled = self.client.post(f"/supervision/contracts/{contract['id']}/cancel")
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+
+        response = self.client.post(
+            f"/approvals/{guardian_approval['id']}/approve",
+            json={"actor_id": "guardian-demo"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(store.list_proposals(contract["id"])[0].status, "INVALIDATED")
+        self.assertEqual(store.get_contract(contract["id"]).status, "CANCELLED")
+        notices = store.list_guardian_notifications("guardian-demo")
+        self.assertFalse(any(notice.contract_id == contract["id"] for notice in notices))
 
     def test_availability_change_invalidates_before_confirmation(self) -> None:
         _, proposal = self._make_proposal("10-10", "event-availability-changed-001")
@@ -571,8 +628,8 @@ class HealthEndpointTests(unittest.TestCase):
         unavailable = self.client.post(
             "/caregivers/caregiver-alt-demo/availability",
             json={
-                "start_time": "2027-10-10T15:00:00+05:30",
-                "end_time": "2027-10-10T17:00:00+05:30",
+                "start_time": f"{FUTURE_SCHEDULE_YEAR}-10-10T15:00:00+05:30",
+                "end_time": f"{FUTURE_SCHEDULE_YEAR}-10-10T17:00:00+05:30",
                 "availability_status": "UNAVAILABLE",
                 "source": "CAREGIVER",
             },
@@ -591,6 +648,80 @@ class HealthEndpointTests(unittest.TestCase):
         ).json()
         self.assertEqual(proposals[0]["status"], "INVALIDATED")
         self.assertIsNone(response.json().get("replacement_contract"))
+        self._assert_failed_proposal_notice(
+            proposal["original_contract_id"],
+            "The proposed caregiver is no longer available for the full interval.",
+        )
+
+    def test_proposal_sweep_expires_overdue_legacy_proposal_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "proposal-expiry.db")
+            database = SQLiteStore(path, environment="test")
+            with patch("backend.main.store", database):
+                contract, proposal = self._make_proposal("11-10", "expiry-overdue")
+                _, future = self._make_proposal("11-20", "expiry-future")
+                guardian = self._approval_for(proposal["id"], "GUARDIAN")
+                caregiver = self._approval_for(proposal["id"], "CAREGIVER")
+                approved = self.client.post(
+                    f"/approvals/{guardian['id']}/approve",
+                    json={"actor_id": "guardian-demo"},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                self.assertEqual(proposal["expires_at"], proposal["proposed_start_time"])
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute(
+                        """UPDATE supervision_proposals
+                           SET payload = json_remove(payload, '$.expires_at') WHERE id = ?""",
+                        (proposal["id"],),
+                    )
+
+                with patch("backend.store.datetime", wraps=datetime) as clock:
+                    clock.now.return_value = datetime.fromisoformat(proposal["proposed_start_time"])
+                    database.expire_overdue_proposals()
+                    database.expire_overdue_proposals()
+
+                self.assertEqual(database.list_proposals(contract["id"])[0].status, "EXPIRED")
+                self.assertEqual(database.get_contract(contract["id"]).status, "ESCALATED")
+                self.assertEqual(database.get_contract(contract["id"]).version, 3)
+                self.assertCountEqual(
+                    [event.action for event in database.list_audit_events(proposal["id"])],
+                    ["PROPOSAL_CREATED", "GUARDIAN_APPROVED", "PROPOSAL_EXPIRED"],
+                )
+                pending = {approval.id for approval in database.list_pending_approvals()}
+                self.assertNotIn(caregiver["id"], pending)
+                self.assertIn(self._approval_for(future["id"], "GUARDIAN")["id"], pending)
+                self._assert_failed_proposal_notice(
+                    contract["id"], "The replacement proposal expired before all required responses arrived."
+                )
+
+    def test_late_guardian_approval_expires_proposal_without_scheduler(self) -> None:
+        contract, proposal = self._make_proposal("11-25", "expiry-late-approval")
+        guardian = self._approval_for(proposal["id"], "GUARDIAN")
+        accepted = self.client.post(
+            f"/proposals/{proposal['id']}/accept",
+            json={"actor_id": "caregiver-alt-demo"},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        endpoint = f"/approvals/{guardian['id']}/approve"
+        payload = {"actor_id": "guardian-demo"}
+
+        with patch("backend.store.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromisoformat(proposal["proposed_start_time"])
+            response = self.client.post(endpoint, json=payload)
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertIn("expired", response.json()["detail"])
+            repeated = self.client.post(endpoint, json=payload)
+            self.assertEqual(repeated.status_code, 409, repeated.text)
+            self.assertEqual(repeated.json(), response.json())
+
+        self.assertEqual(store.list_proposals(contract["id"])[0].status, "EXPIRED")
+        self.assertEqual(store.get_contract(contract["id"]).status, "ESCALATED")
+        events = store.list_audit_events(proposal["id"])
+        self.assertEqual([event.action for event in events].count("PROPOSAL_EXPIRED"), 1)
+        self.assertNotIn("GUARDIAN_APPROVED", [event.action for event in events])
+        self._assert_failed_proposal_notice(
+            contract["id"], "The replacement proposal expired before all required responses arrived."
+        )
 
     def test_assigned_caregiver_confirms_handover_and_contract_becomes_active(self) -> None:
         contract = self._make_handover_contract()

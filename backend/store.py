@@ -33,6 +33,12 @@ from backend.models.supervision import (
 
 
 DEFAULT_DATABASE_PATH = Path(__file__).parent / "data" / "caresync.db"
+AWAITING_RESPONSE_STATUSES = (
+    ProposalStatus.PENDING,
+    ProposalStatus.APPROVED,
+    ProposalStatus.ACCEPTED,
+)
+PROPOSAL_EXPIRY_REASON = "The replacement proposal expired before all required responses arrived."
 
 
 class CancellationConflict(ValueError):
@@ -557,6 +563,8 @@ class SQLiteStore:
     ) -> ProposalDecisionResult:
         if actor_id != approval.approver_id:
             raise WorkflowConflict("Actor does not match the assigned responder")
+        if approval.status == DecisionStatus.EXPIRED:
+            raise WorkflowConflict(PROPOSAL_EXPIRY_REASON)
         if approval.status != DecisionStatus.PENDING:
             raise WorkflowConflict("This response has already been recorded")
 
@@ -567,11 +575,7 @@ class SQLiteStore:
         if proposal_row is None:
             raise WorkflowNotFound("Proposal not found")
         proposal = SupervisionProposal.model_validate_json(proposal_row["payload"])
-        if proposal.status not in {
-            ProposalStatus.PENDING,
-            ProposalStatus.APPROVED,
-            ProposalStatus.ACCEPTED,
-        }:
+        if proposal.status not in AWAITING_RESPONSE_STATUSES:
             raise WorkflowConflict("Proposal is no longer awaiting responses")
 
         contract_row = connection.execute(
@@ -583,6 +587,11 @@ class SQLiteStore:
         contract = SupervisionContract.model_validate_json(contract_row["payload"])
 
         responded_at = datetime.now(timezone.utc)
+        if responded_at >= proposal.response_deadline:
+            self._expire_proposal(connection, proposal, contract, responded_at)
+            approval.status = DecisionStatus.EXPIRED
+            return ProposalDecisionResult(approval=approval, proposal=proposal)
+
         approval.response_timestamp = responded_at
         approval.status = decision
         self._save_approval(connection, approval)
@@ -606,20 +615,14 @@ class SQLiteStore:
             )
 
         if decision in {DecisionStatus.REJECTED, DecisionStatus.DECLINED}:
-            proposal.status = (
-                ProposalStatus.REJECTED
-                if decision == DecisionStatus.REJECTED
-                else ProposalStatus.DECLINED
-            )
-            contract.status = ContractStatus.ESCALATED
-            contract.version += 1
-            contract.updated_at = datetime.now(timezone.utc)
-            self._save_contract(connection, contract)
+            if decision == DecisionStatus.REJECTED:
+                proposal.status = ProposalStatus.REJECTED
+                reason = "The guardian rejected the replacement proposal."
+            else:
+                proposal.status = ProposalStatus.DECLINED
+                reason = "The proposed caregiver declined the replacement proposal."
             self._save_proposal(connection, proposal)
-            self._insert_audit_event(
-                connection, contract.family_id, "system", ActorType.SYSTEM,
-                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
-            )
+            self._escalate_failed_proposal(connection, contract, proposal, reason)
             return ProposalDecisionResult(approval=approval, proposal=proposal)
 
         approval_rows = connection.execute(
@@ -713,27 +716,13 @@ class SQLiteStore:
         reason: str,
     ) -> ProposalDecisionResult:
         proposal.status = ProposalStatus.INVALIDATED
-        pending_rows = connection.execute(
-            "SELECT payload FROM approvals WHERE proposal_id = ? AND status = ?",
-            (proposal.id, DecisionStatus.PENDING),
-        ).fetchall()
-        for row in pending_rows:
-            pending = Approval.model_validate_json(row["payload"])
-            pending.status = DecisionStatus.INVALIDATED
-            self._save_approval(connection, pending)
+        self._close_pending_approvals(connection, proposal.id, DecisionStatus.INVALIDATED)
         if contract.status not in {
             ContractStatus.ESCALATED,
             ContractStatus.CANCELLED,
             ContractStatus.COMPLETED,
         }:
-            contract.status = ContractStatus.ESCALATED
-            contract.version += 1
-            contract.updated_at = datetime.now(timezone.utc)
-            self._save_contract(connection, contract)
-            self._insert_audit_event(
-                connection, contract.family_id, "system", ActorType.SYSTEM,
-                "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
-            )
+            self._escalate_failed_proposal(connection, contract, proposal, reason)
         self._save_proposal(connection, proposal)
         self._insert_audit_event(
             connection, contract.family_id, "system", ActorType.SYSTEM,
@@ -745,11 +734,46 @@ class SQLiteStore:
             invalidated_reason=reason,
         )
 
+    def _escalate_failed_proposal(
+        self,
+        connection: sqlite3.Connection,
+        contract: SupervisionContract,
+        proposal: SupervisionProposal,
+        reason: str,
+    ) -> None:
+        contract.status = ContractStatus.ESCALATED
+        contract.version += 1
+        contract.updated_at = datetime.now(timezone.utc)
+        self._save_contract(connection, contract)
+        self._insert_audit_event(
+            connection, contract.family_id, "system", ActorType.SYSTEM,
+            "SUPERVISION_ESCALATED", contract.id, proposal.id, contract.updated_at,
+        )
+        self._insert_guardian_notification(
+            connection,
+            contract,
+            GuardianNotificationKind.REPLACEMENT_PROPOSAL_FAILED,
+            f"{reason} Please arrange supervision for the scheduled window.",
+            proposal_id=proposal.id,
+        )
+
     def _save_approval(self, connection: sqlite3.Connection, approval: Approval) -> None:
         connection.execute(
             "UPDATE approvals SET status = ?, payload = ? WHERE id = ?",
             (approval.status, approval.model_dump_json(), approval.id),
         )
+
+    def _close_pending_approvals(
+        self, connection: sqlite3.Connection, proposal_id: str, status: DecisionStatus
+    ) -> None:
+        rows = connection.execute(
+            "SELECT payload FROM approvals WHERE proposal_id = ? AND status = ?",
+            (proposal_id, DecisionStatus.PENDING),
+        ).fetchall()
+        for row in rows:
+            approval = Approval.model_validate_json(row["payload"])
+            approval.status = status
+            self._save_approval(connection, approval)
 
     def _save_proposal(
         self,
@@ -873,6 +897,43 @@ class SQLiteStore:
             )
         return contract
 
+    def expire_overdue_proposals(self) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            checked_at = datetime.now(timezone.utc)
+            rows = connection.execute(
+                """SELECT p.payload AS proposal, c.payload AS contract
+                   FROM supervision_proposals AS p
+                   JOIN supervision_contracts AS c ON c.id = p.original_contract_id
+                   WHERE p.status IN (?, ?, ?)""",
+                AWAITING_RESPONSE_STATUSES,
+            ).fetchall()
+            for row in rows:
+                proposal = SupervisionProposal.model_validate_json(row["proposal"])
+                if checked_at >= proposal.response_deadline:
+                    contract = SupervisionContract.model_validate_json(row["contract"])
+                    self._expire_proposal(connection, proposal, contract, checked_at)
+
+    def _expire_proposal(
+        self,
+        connection: sqlite3.Connection,
+        proposal: SupervisionProposal,
+        contract: SupervisionContract,
+        checked_at: datetime,
+    ) -> None:
+        proposal.status = ProposalStatus.EXPIRED
+        self._save_proposal(connection, proposal)
+        self._close_pending_approvals(connection, proposal.id, DecisionStatus.EXPIRED)
+        self._insert_audit_event(
+            connection, contract.family_id, "system", ActorType.SYSTEM,
+            "PROPOSAL_EXPIRED", proposal.id, proposal.id, checked_at,
+        )
+        if (
+            contract.status == ContractStatus.CONFLICTED
+            and contract.version == proposal.original_contract_version
+        ):
+            self._escalate_failed_proposal(connection, contract, proposal, PROPOSAL_EXPIRY_REASON)
+
     def escalate_overdue_handovers(self) -> None:
         checked_at = datetime.now(timezone.utc)
         with self._connection() as connection:
@@ -952,14 +1013,20 @@ class SQLiteStore:
         contract: SupervisionContract,
         kind: GuardianNotificationKind,
         message: str,
+        *,
+        proposal_id: Optional[str] = None,
     ) -> None:
-        # Prefer the replacement's approving guardian. Older contracts can lack
-        # that link, so fall back to the family's usual guardian ordering.
+        # Prefer the failed proposal's assigned guardian, then the guardian who
+        # approved the contract if it was itself a replacement.
         guardian = connection.execute(
             """SELECT m.id FROM family_members AS m
                WHERE m.family_id = ? AND m.role = 'GUARDIAN'
                  AND COALESCE(json_extract(m.payload, '$.status'), 'ACTIVE') = 'ACTIVE'
                ORDER BY EXISTS (
+                   SELECT 1 FROM approvals AS a
+                   WHERE a.proposal_id = ? AND a.approver_id = m.id
+                     AND a.approval_type = 'GUARDIAN'
+               ) DESC, EXISTS (
                    SELECT 1 FROM audit_events AS e
                    JOIN approvals AS a ON a.proposal_id = e.correlation_id
                    WHERE e.resource_id = ?
@@ -968,7 +1035,7 @@ class SQLiteStore:
                      AND a.status = 'APPROVED'
                ) DESC, m.id
                LIMIT 1""",
-            (contract.family_id, contract.id),
+            (contract.family_id, proposal_id, contract.id),
         ).fetchone()
         if guardian is None:
             return
@@ -1138,7 +1205,7 @@ class SQLiteStore:
             contract.version += 1
             contract.updated_at = datetime.now(timezone.utc)
             proposal = None
-            if candidates and guardians:
+            if candidates and guardians and contract.updated_at < contract.start_time:
                 contract.status = ContractStatus.CONFLICTED
                 proposal = SupervisionProposal(
                     id=f"proposal-{uuid4().hex}",
@@ -1147,6 +1214,7 @@ class SQLiteStore:
                     proposed_caregiver_id=candidates[0].id,
                     proposed_start_time=contract.start_time,
                     proposed_end_time=contract.end_time,
+                    expires_at=contract.start_time,
                     reason=event.reason,
                 )
                 connection.execute(
@@ -1195,6 +1263,8 @@ class SQLiteStore:
             else:
                 contract.status = ContractStatus.ESCALATED
                 message = "No caregiver is available for the full interval; guardian action is required."
+                if contract.updated_at >= contract.start_time:
+                    message = "The supervision window has started; guardian action is required."
 
             if not self._save_contract(connection, contract):
                 raise LookupError("Supervision contract not found")
