@@ -185,6 +185,8 @@ class HealthEndpointTests(unittest.TestCase):
 
             self.assertEqual(database.get_contract(overdue.id).status, "ESCALATED")
             self.assertEqual(database.get_contract(overdue.id).version, 2)
+            inbox = database.list_guardian_notifications("guardian-demo")
+            self.assertEqual([notice.contract_id for notice in inbox], [overdue.id])
             self.assertEqual(
                 [event.action for event in database.list_audit_events(overdue.id)],
                 ["HANDOVER_TIMEOUT_ESCALATED"],
@@ -662,6 +664,15 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 200, repeated.text)
         self.assertEqual(repeated.json()["version"], 2)
         self.assertEqual(len(store.list_audit_events(contract.id)), 1)
+
+        inbox = self.client.get("/guardians/guardian-demo/notifications")
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        notices = [notice for notice in inbox.json() if notice["contract_id"] == contract.id]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["guardian_id"], "guardian-demo")
+        self.assertEqual(self.client.get("/guardians/caregiver-demo/notifications").json(), [])
+        with patch.object(store, "environment", "production"):
+            self.assertEqual(self.client.get("/guardians/guardian-demo/notifications").status_code, 501)
 
     def test_handover_timeout_is_rejected_before_start(self) -> None:
         contract = self._make_handover_contract(

@@ -271,6 +271,14 @@ class ActorType(str, Enum):
     SYSTEM = "SYSTEM"
 
 
+class GuardianNotification(CareSyncModel):
+    id: str
+    guardian_id: str
+    contract_id: str
+    message: str
+    created_at: datetime
+
+
 class AuditEvent(CareSyncModel):
     id: str
     family_id: str

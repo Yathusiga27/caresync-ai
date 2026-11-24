@@ -17,6 +17,7 @@ from backend.models.supervision import (
     CaregiverCancellationEvent,
     DecisionStatus,
     FamilyMember,
+    GuardianNotification,
     MemberRole,
     SupervisionProposal,
     SupervisionContract,
@@ -242,6 +243,12 @@ def require_local_workflow_mode() -> None:
             status_code=501,
             detail="This workflow requires authenticated identity, which is not configured.",
         )
+
+
+@app.get("/guardians/{guardian_id}/notifications", response_model=list[GuardianNotification])
+def read_guardian_notifications(guardian_id: str) -> list[GuardianNotification]:
+    require_local_workflow_mode()
+    return store.list_guardian_notifications(guardian_id)
 
 
 def workflow_result(result: ProposalDecisionResult) -> ProposalDecisionResult:
