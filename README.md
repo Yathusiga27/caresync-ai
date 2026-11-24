@@ -25,7 +25,7 @@ The API persists families, members, caregiver availability, contracts, proposals
 | AI model | Ollama / Qwen3 | Client configured; live inference not yet verified |
 | Agent framework | Python; LangGraph is under consideration for workflow orchestration | Ollama chat and bounded read-only tool use implemented; LangGraph planned |
 | Backend API | FastAPI | Implemented |
-| Frontend | React / Tailwind CSS | Planned |
+| Frontend | React / Vite / Tailwind CSS | App shell and navigation implemented |
 | Database | SQLite | Implemented for family coordination data and cancellation events |
 | Agent management | WSO2 Agent Manager | Planned |
 | Identity management | ThunderID | Planned |
@@ -49,6 +49,20 @@ uvicorn backend.main:app --reload
 The chat service defaults to `http://127.0.0.1:11434` and model `qwen3:4b`. Override these before starting the server with `CARESYNC_OLLAMA_HOST` and `CARESYNC_OLLAMA_MODEL`. The selected model must already be installed in Ollama; the app does not download models automatically.
 
 The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+
+### Run the frontend
+
+From the repository root, use Node.js 20.19+ or 22.12+:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://localhost:5173`. The foundation includes the five workspace pages and a local demo role switcher. Live dashboard data and workflow actions are pending.
+
+The Fetch API client defaults to `/api`. Vite forwards that prefix to the local FastAPI server at `http://127.0.0.1:8000` in development. Copy `frontend/.env.example` to `frontend/.env.local` to override the browser-facing `VITE_API_BASE_URL` or the Vite-only `CARESYNC_API_PROXY_TARGET`.
 
 ### Automatic supervision escalation
 
