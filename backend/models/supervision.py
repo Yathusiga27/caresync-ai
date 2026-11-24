@@ -271,10 +271,16 @@ class ActorType(str, Enum):
     SYSTEM = "SYSTEM"
 
 
+class GuardianNotificationKind(str, Enum):
+    MISSED_HANDOVER = "MISSED_HANDOVER"
+    UNRESOLVED_CANCELLATION = "UNRESOLVED_CANCELLATION"
+
+
 class GuardianNotification(CareSyncModel):
     id: str
     guardian_id: str
     contract_id: str
+    kind: GuardianNotificationKind
     message: str
     created_at: datetime
 

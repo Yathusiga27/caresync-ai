@@ -1,7 +1,9 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
 from unittest.mock import patch
@@ -342,16 +344,22 @@ class HealthEndpointTests(unittest.TestCase):
             f"/supervision/contracts/{contract['id']}/proposals"
         )
         self.assertEqual(len(proposals.json()), 1)
+        self.assertFalse(
+            any(
+                notice.contract_id == contract["id"]
+                for notice in store.list_guardian_notifications("guardian-demo")
+            )
+        )
         cancellation_events = store.list_audit_events(contract["id"])
         self.assertEqual(
             [(event.action, event.actor_id, event.correlation_id)
              for event in cancellation_events],
-            [("CAREGIVER_CANCELLATION_RECORDED", "caregiver-demo", first["event_id"])],
+            [("CAREGIVER_CANCELLATION_RECORDED", "caregiver-demo", outcome["event_id"])],
         )
-        proposal_events = store.list_audit_events(first["proposal"]["id"])
+        proposal_events = store.list_audit_events(outcome["proposal"]["id"])
         self.assertEqual(
             [(event.action, event.correlation_id) for event in proposal_events],
-            [("PROPOSAL_CREATED", first["event_id"])],
+            [("PROPOSAL_CREATED", outcome["event_id"])],
         )
 
     def test_cancellation_escalates_when_alternative_is_unavailable(self) -> None:
@@ -394,6 +402,15 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(outcome["contract_status"], "ESCALATED")
         self.assertIsNone(outcome["proposal"])
+        duplicate = self._submit_cancellation(contract["id"], "event-no-alt-001")
+        self.assertTrue(duplicate["duplicate"])
+
+        inbox = self.client.get("/guardians/guardian-demo/notifications")
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        notices = [notice for notice in inbox.json() if notice["contract_id"] == contract["id"]]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["guardian_id"], "guardian-demo")
+        self.assertEqual(notices[0]["kind"], "UNRESOLVED_CANCELLATION")
 
     def test_duplicate_cancellation_event_does_not_create_another_proposal(self) -> None:
         contract = self._create_contract(
@@ -670,9 +687,39 @@ class HealthEndpointTests(unittest.TestCase):
         notices = [notice for notice in inbox.json() if notice["contract_id"] == contract.id]
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0]["guardian_id"], "guardian-demo")
+        self.assertEqual(notices[0]["kind"], "MISSED_HANDOVER")
         self.assertEqual(self.client.get("/guardians/caregiver-demo/notifications").json(), [])
         with patch.object(store, "environment", "production"):
             self.assertEqual(self.client.get("/guardians/guardian-demo/notifications").status_code, 501)
+
+    def test_existing_handover_notification_survives_database_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "legacy-notifications.db")
+            database = SQLiteStore(path, environment="test")
+            contract = self._make_handover_contract(database=database)
+            database.check_handover_timeout(contract.id, "legacy-handover")
+            original = database.list_guardian_notifications("guardian-demo")
+            self.assertEqual(len(original), 1)
+
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    """CREATE TABLE missed_handover_notifications (
+                        id TEXT PRIMARY KEY,
+                        guardian_id TEXT NOT NULL REFERENCES family_members(id),
+                        contract_id TEXT NOT NULL UNIQUE REFERENCES supervision_contracts(id),
+                        message TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )"""
+                )
+                connection.execute(
+                    """INSERT INTO missed_handover_notifications
+                       SELECT id, guardian_id, contract_id, message, created_at
+                       FROM guardian_notifications"""
+                )
+                connection.execute("DROP TABLE guardian_notifications")
+            for _ in range(2):
+                reopened = SQLiteStore(path, environment="test")
+                self.assertEqual(reopened.list_guardian_notifications("guardian-demo"), original)
 
     def test_handover_timeout_is_rejected_before_start(self) -> None:
         contract = self._make_handover_contract(
