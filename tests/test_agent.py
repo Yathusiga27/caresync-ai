@@ -54,7 +54,7 @@ class StubOllamaClient:
 class CareSyncAgentTests(unittest.TestCase):
     def test_conflicted_contract_tools_produce_validated_alternative(self) -> None:
         contract_id = f"contract-agent-{uuid4().hex}"
-        start_time = datetime(2027, 1, 10, 14, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        start_time = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(days=1)
         end_time = start_time + timedelta(hours=4)
         contract = SupervisionContract(
             id=contract_id,

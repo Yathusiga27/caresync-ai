@@ -50,9 +50,11 @@ The chat service defaults to `http://127.0.0.1:11434` and model `qwen3:4b`. Over
 
 The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
-### Automatic handover escalation
+### Automatic supervision escalation
 
 In local development, set `CARESYNC_ENABLE_HANDOVER_SCHEDULER=1` before starting the API to enable the background sweep. In PowerShell, use `$env:CARESYNC_ENABLE_HANDOVER_SCHEDULER = "1"`. The sweep checks at startup and every 30 seconds while the API is running. A confirmed contract with a pending handover is eligible for escalation as soon as its scheduled start time is reached. The escalation is recorded in SQLite. The manual timeout endpoint is available for explicit checks.
+
+The same sweep expires replacement proposals that still need a response when the scheduled supervision starts. The backend closes outstanding approval and acceptance requests and escalates the contract if it is still conflicted at the proposal's version. Response endpoints enforce the deadline even with the scheduler disabled. A response at or after the deadline returns HTTP 409.
 
 ### Guardian inbox for supervision escalations
 
@@ -60,7 +62,7 @@ In development and test environments, `GET /guardians/{guardian_id}/notification
 
 - `MISSED_HANDOVER` for an escalated handover timeout.
 - `UNRESOLVED_CANCELLATION` when a cancellation escalates without a replacement proposal.
-- `REPLACEMENT_PROPOSAL_FAILED` when rejection, decline, or invalidation of a replacement proposal escalates the contract.
+- `REPLACEMENT_PROPOSAL_FAILED` when rejection, decline, invalidation, or expiry of a replacement proposal escalates the contract.
 
 The backend saves the notice in the same SQLite transaction as the escalation. Retrying the workflow preserves the original notice. A failed proposal goes to its assigned guardian if still active. When the contract itself was a replacement, the backend next prefers the guardian who approved it. Otherwise it selects the first active family guardian by ID. If none exists, the contract still escalates. Existing missed-handover notices are migrated automatically.
 

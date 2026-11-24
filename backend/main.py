@@ -19,6 +19,7 @@ from backend.models.supervision import (
     FamilyMember,
     GuardianNotification,
     MemberRole,
+    ProposalStatus,
     SupervisionProposal,
     SupervisionContract,
     ProposalDecisionResult,
@@ -30,21 +31,28 @@ from backend.schemas import (
     CaregiverAvailabilityCreate,
     ContractCreate,
 )
-from backend.store import CancellationConflict, WorkflowConflict, WorkflowNotFound, store
+from backend.store import (
+    PROPOSAL_EXPIRY_REASON,
+    CancellationConflict,
+    WorkflowConflict,
+    WorkflowNotFound,
+    store,
+)
 
 logger = logging.getLogger(__name__)
-HANDOVER_SWEEP_INTERVAL_SECONDS = 30
+SUPERVISION_SWEEP_INTERVAL_SECONDS = 30
 
 
-async def run_handover_scheduler(stop: asyncio.Event) -> None:
+async def run_supervision_scheduler(stop: asyncio.Event) -> None:
     while not stop.is_set():
-        try:
-            await asyncio.to_thread(store.escalate_overdue_handovers)
-        except Exception:
-            logger.exception("Handover timeout sweep failed")
+        for sweep in (store.expire_overdue_proposals, store.escalate_overdue_handovers):
+            try:
+                await asyncio.to_thread(sweep)
+            except Exception:
+                logger.exception("Supervision timeout sweep failed in %s", sweep.__name__)
 
         try:
-            await asyncio.wait_for(stop.wait(), timeout=HANDOVER_SWEEP_INTERVAL_SECONDS)
+            await asyncio.wait_for(stop.wait(), timeout=SUPERVISION_SWEEP_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             continue
 
@@ -59,7 +67,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         return
 
     stop = asyncio.Event()
-    scheduler = asyncio.create_task(run_handover_scheduler(stop))
+    scheduler = asyncio.create_task(run_supervision_scheduler(stop))
     try:
         yield
     finally:
@@ -252,6 +260,8 @@ def read_guardian_notifications(guardian_id: str) -> list[GuardianNotification]:
 
 
 def workflow_result(result: ProposalDecisionResult) -> ProposalDecisionResult:
+    if result.proposal.status == ProposalStatus.EXPIRED:
+        raise HTTPException(status_code=409, detail=PROPOSAL_EXPIRY_REASON)
     if result.invalidated_reason is not None:
         raise HTTPException(status_code=409, detail=result.invalidated_reason)
     return result

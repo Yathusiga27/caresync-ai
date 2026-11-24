@@ -114,6 +114,7 @@ class DecisionStatus(str, Enum):
     REJECTED = "REJECTED"
     ACCEPTED = "ACCEPTED"
     DECLINED = "DECLINED"
+    EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
 
 
@@ -177,6 +178,11 @@ class SupervisionProposal(CareSyncModel):
     status: ProposalStatus = ProposalStatus.PENDING
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: Optional[datetime] = None
+
+    @property
+    def response_deadline(self) -> datetime:
+        # Proposals saved before deadlines were explicit use the scheduled start.
+        return min(self.expires_at or self.proposed_start_time, self.proposed_start_time)
 
     @field_validator("proposed_start_time", "proposed_end_time", "created_at", "expires_at")
     @classmethod
