@@ -43,6 +43,7 @@ class FamilyMember(CareSyncModel):
     name: str
     role: MemberRole
     status: MemberStatus = MemberStatus.ACTIVE
+    available_for_scheduling: bool = True
 
 
 class AvailabilityStatus(str, Enum):
@@ -99,6 +100,7 @@ class CaregiverCancellationEvent(CareSyncModel):
 class ContractStatus(str, Enum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
+    DECLINED = "DECLINED"
     CONFIRMED = "CONFIRMED"
     ACTIVE = "ACTIVE"
     COMPLETED = "COMPLETED"
@@ -128,6 +130,7 @@ class SupervisionContract(CareSyncModel):
     family_id: str
     child_id: str
     caregiver_id: str
+    guardian_id: Optional[str] = None
     activity: str
     expected_location: str
     start_time: datetime
@@ -135,6 +138,7 @@ class SupervisionContract(CareSyncModel):
     status: ContractStatus = ContractStatus.DRAFT
     approval_status: DecisionStatus = DecisionStatus.PENDING
     acceptance_status: DecisionStatus = DecisionStatus.PENDING
+    decline_reason: Optional[str] = None
     handover_status: HandoverStatus = HandoverStatus.PENDING
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=utc_now)
@@ -230,6 +234,13 @@ class Approval(CareSyncModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("timestamp must include a timezone")
         return value
+
+
+class ScheduleRequest(CareSyncModel):
+    contract: SupervisionContract
+    approval_type: ApprovalType
+    replacement_approval: Optional[Approval] = None
+    proposed_caregiver_id: Optional[str] = None
 
 
 class ProposalDecisionResult(CareSyncModel):

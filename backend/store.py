@@ -29,6 +29,7 @@ from backend.models.supervision import (
     SupervisionProposal,
     ProposalDecisionResult,
     ProposalStatus,
+    ScheduleRequest,
 )
 
 
@@ -208,6 +209,34 @@ class SQLiteStore:
             connection.execute("BEGIN IMMEDIATE")
             self._migrate_audit_actor_ids(connection)
             self._migrate_missed_handover_notifications(connection)
+            self._migrate_initial_schedules(connection)
+
+    def _migrate_initial_schedules(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """SELECT payload FROM supervision_contracts
+               WHERE (status = ? AND json_extract(payload, '$.approval_status') = ?)
+                  OR (status = ? AND json_extract(payload, '$.acceptance_status') = ?
+                      AND json_type(payload, '$.decline_reason') IS NULL)""",
+            (
+                ContractStatus.PENDING_APPROVAL, DecisionStatus.PENDING,
+                ContractStatus.CANCELLED, DecisionStatus.DECLINED,
+            ),
+        ).fetchall()
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            contract = SupervisionContract.model_validate_json(row["payload"])
+            contract.guardian_id = contract.guardian_id or self._schedule_guardian_id(connection, contract)
+            if contract.status == ContractStatus.CANCELLED:
+                contract.status = ContractStatus.DECLINED
+            else:
+                contract.approval_status = DecisionStatus.APPROVED
+                if contract.acceptance_status == DecisionStatus.ACCEPTED:
+                    contract.status = (
+                        ContractStatus.CONFIRMED if now < contract.end_time else ContractStatus.EXPIRED
+                    )
+            contract.version += 1
+            contract.updated_at = now
+            self._save_contract(connection, contract)
 
     @staticmethod
     def _migrate_missed_handover_notifications(connection: sqlite3.Connection) -> None:
@@ -313,6 +342,34 @@ class SQLiteStore:
             ).fetchall()
         return [FamilyMember.model_validate_json(row["payload"]) for row in rows]
 
+    def create_family_member(self, member: FamilyMember) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT INTO family_members (id, family_id, role, payload) VALUES (?, ?, ?, ?)",
+                (member.id, member.family_id, member.role, member.model_dump_json()),
+            )
+
+    def set_caregiver_scheduling_availability(
+        self, family_id: str, member_id: str, available: bool
+    ) -> FamilyMember:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM family_members WHERE id = ? AND family_id = ?",
+                (member_id, family_id),
+            ).fetchone()
+            if row is None:
+                raise WorkflowNotFound("Family member not found")
+            member = FamilyMember.model_validate_json(row["payload"])
+            if member.role != MemberRole.CAREGIVER or member.status != MemberStatus.ACTIVE:
+                raise WorkflowConflict("Only active caregivers can set scheduling availability")
+            member.available_for_scheduling = available
+            connection.execute(
+                "UPDATE family_members SET payload = ? WHERE id = ? AND family_id = ?",
+                (member.model_dump_json(), member_id, family_id),
+            )
+            return member
+
     def get_member(self, member_id: str) -> Optional[FamilyMember]:
         with self._connection() as connection:
             row = connection.execute(
@@ -392,7 +449,7 @@ class SQLiteStore:
                 }
             if not self._caregiver_available_for(
                 connection,
-                caregiver.id,
+                caregiver,
                 contract.start_time,
                 contract.end_time,
             ):
@@ -404,7 +461,34 @@ class SQLiteStore:
 
     def create_contract(self, contract: SupervisionContract) -> None:
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM family_members WHERE id = ?", (contract.caregiver_id,)
+            ).fetchone()
+            if row is not None:
+                caregiver = FamilyMember.model_validate_json(row["payload"])
+                if caregiver.status != MemberStatus.ACTIVE or not caregiver.available_for_scheduling:
+                    raise WorkflowConflict("This caregiver is unavailable for new schedules")
+            if contract.status == ContractStatus.PENDING_APPROVAL:
+                guardian_id = self._schedule_guardian_id(connection, contract)
+                if contract.guardian_id and guardian_id is None:
+                    raise WorkflowConflict("The guardian must be an active member of this family")
+                contract.guardian_id = guardian_id
+                contract.approval_status = DecisionStatus.APPROVED
             self._insert_contract(connection, contract)
+
+    def _schedule_guardian_id(
+        self, connection: sqlite3.Connection, contract: SupervisionContract
+    ) -> Optional[str]:
+        row = connection.execute(
+            """SELECT id FROM family_members
+               WHERE family_id = ? AND role = ?
+                 AND COALESCE(json_extract(payload, '$.status'), 'ACTIVE') = 'ACTIVE'
+                 AND (? IS NULL OR id = ?)
+               ORDER BY id LIMIT 1""",
+            (contract.family_id, MemberRole.GUARDIAN, contract.guardian_id, contract.guardian_id),
+        ).fetchone()
+        return row["id"] if row else None
 
     def _insert_contract(
         self,
@@ -440,6 +524,32 @@ class SQLiteStore:
                 "SELECT payload FROM supervision_contracts WHERE id = ?", (contract_id,)
             ).fetchone()
         return SupervisionContract.model_validate_json(row["payload"]) if row else None
+
+    def list_family_contracts(self, family_id: str) -> list[SupervisionContract]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE family_id = ?",
+                (family_id,),
+            ).fetchall()
+        contracts = [SupervisionContract.model_validate_json(row["payload"]) for row in rows]
+        return sorted(contracts, key=lambda contract: (contract.start_time, contract.id))
+
+    def cancel_contract(self, contract_id: str) -> SupervisionContract:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE id = ?", (contract_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkflowNotFound("Supervision contract not found")
+            contract = SupervisionContract.model_validate_json(row["payload"])
+            if contract.status in {ContractStatus.COMPLETED, ContractStatus.CANCELLED}:
+                raise WorkflowConflict("Contract cannot be cancelled in its current state")
+            contract.status = ContractStatus.CANCELLED
+            contract.version += 1
+            contract.updated_at = datetime.now(timezone.utc)
+            self._save_contract(connection, contract)
+            return contract
 
     def save_contract(self, contract: SupervisionContract) -> bool:
         with self._connection() as connection:
@@ -507,6 +617,161 @@ class SQLiteStore:
                 (DecisionStatus.PENDING,),
             ).fetchall()
         return [Approval.model_validate_json(row["payload"]) for row in rows]
+
+    @staticmethod
+    def _can_respond_to_schedule(contract: SupervisionContract, actor: FamilyMember) -> bool:
+        return (
+            actor.status == MemberStatus.ACTIVE
+            and actor.role == MemberRole.CAREGIVER
+            and actor.id == contract.caregiver_id
+            and contract.acceptance_status == DecisionStatus.PENDING
+        )
+
+    def list_family_schedule_requests(self, family_id: str, actor_id: str) -> list[ScheduleRequest]:
+        now = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            actor = self._family_actor(connection, family_id, actor_id)
+            if actor.status != MemberStatus.ACTIVE:
+                return []
+            rows = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE family_id = ? AND status = ?",
+                (family_id, ContractStatus.PENDING_APPROVAL),
+            ).fetchall()
+            requests = []
+            for row in rows:
+                contract = SupervisionContract.model_validate_json(row["payload"])
+                if now >= contract.end_time:
+                    continue
+                if self._can_respond_to_schedule(contract, actor):
+                    requests.append(ScheduleRequest(contract=contract, approval_type=ApprovalType.CAREGIVER))
+
+            rows = connection.execute(
+                """SELECT a.payload AS approval, p.payload AS proposal, c.payload AS contract
+                   FROM approvals AS a
+                   JOIN supervision_proposals AS p ON p.id = a.proposal_id
+                   JOIN supervision_contracts AS c ON c.id = p.original_contract_id
+                   WHERE c.family_id = ? AND c.status = ? AND a.approver_id = ?
+                     AND a.status = ? AND p.status IN (?, ?, ?)""",
+                (family_id, ContractStatus.CONFLICTED, actor_id, DecisionStatus.PENDING,
+                 *AWAITING_RESPONSE_STATUSES),
+            ).fetchall()
+            for row in rows:
+                proposal = SupervisionProposal.model_validate_json(row["proposal"])
+                if now >= proposal.response_deadline:
+                    continue
+                contract = SupervisionContract.model_validate_json(row["contract"])
+                approval = Approval.model_validate_json(row["approval"])
+                requests.append(ScheduleRequest(
+                    contract=contract, approval_type=approval.approval_type,
+                    replacement_approval=approval,
+                    proposed_caregiver_id=proposal.proposed_caregiver_id,
+                ))
+        return sorted(requests, key=lambda request: (request.contract.start_time, request.contract.id))
+
+    @staticmethod
+    def _family_actor(
+        connection: sqlite3.Connection, family_id: str, actor_id: str
+    ) -> FamilyMember:
+        row = connection.execute(
+            "SELECT payload FROM family_members WHERE family_id = ? AND id = ?",
+            (family_id, actor_id),
+        ).fetchone()
+        if row is None:
+            raise WorkflowNotFound("Family member not found")
+        return FamilyMember.model_validate_json(row["payload"])
+
+    def record_schedule_decision(
+        self, contract_id: str, actor_id: str, decision: DecisionStatus, *,
+        reason: Optional[str] = None, expected_version: Optional[int] = None,
+    ) -> SupervisionContract:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE id = ?", (contract_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkflowNotFound("Supervision contract not found")
+            contract = SupervisionContract.model_validate_json(row["payload"])
+            if contract.status != ContractStatus.PENDING_APPROVAL:
+                raise WorkflowConflict("This schedule is no longer awaiting a caregiver response")
+            if expected_version is not None and contract.version != expected_version:
+                raise WorkflowConflict("This request has changed. Review the current request and try again")
+            actor = self._family_actor(connection, contract.family_id, actor_id)
+            if not self._can_respond_to_schedule(contract, actor):
+                raise WorkflowConflict("This member has no pending response for this schedule")
+
+            now = datetime.now(timezone.utc)
+            if now >= contract.end_time:
+                raise WorkflowConflict("The supervision window has ended")
+            if decision not in {DecisionStatus.ACCEPTED, DecisionStatus.DECLINED}:
+                raise WorkflowConflict("The caregiver must accept or decline")
+            if decision == DecisionStatus.ACCEPTED:
+                if not actor.available_for_scheduling:
+                    raise WorkflowConflict("This caregiver is unavailable for new schedules")
+                contract.status = ContractStatus.CONFIRMED
+            else:
+                contract.status = ContractStatus.DECLINED
+                contract.decline_reason = (reason or "").strip() or None
+
+            contract.guardian_id = contract.guardian_id or self._schedule_guardian_id(connection, contract)
+            contract.approval_status = DecisionStatus.APPROVED
+            contract.acceptance_status = decision
+            contract.version += 1
+            contract.updated_at = now
+            self._save_contract(connection, contract)
+            self._insert_audit_event(
+                connection, contract.family_id, actor.id, ActorType.USER,
+                f"SCHEDULE_CAREGIVER_{decision.value}", contract.id, contract.id, now,
+            )
+            if contract.status == ContractStatus.CONFIRMED:
+                self._insert_audit_event(
+                    connection, contract.family_id, "system", ActorType.SYSTEM,
+                    "SCHEDULE_CONFIRMED", contract.id, contract.id, now,
+                )
+            return contract
+
+    def request_schedule_caregiver(
+        self, contract_id: str, actor_id: str, caregiver_id: str, expected_version: int,
+    ) -> SupervisionContract:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM supervision_contracts WHERE id = ?", (contract_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkflowNotFound("Supervision contract not found")
+            contract = SupervisionContract.model_validate_json(row["payload"])
+            if contract.version != expected_version or contract.status != ContractStatus.DECLINED:
+                raise WorkflowConflict("Only the current declined request can be reassigned")
+            if actor_id != self._schedule_guardian_id(connection, contract):
+                raise WorkflowConflict("Only the guardian who created this schedule can reassign it")
+
+            now = datetime.now(timezone.utc)
+            if now >= contract.end_time:
+                raise WorkflowConflict("The supervision window has ended")
+            if caregiver_id == contract.caregiver_id:
+                raise WorkflowConflict("Choose another caregiver for this request")
+            caregiver = self._family_actor(connection, contract.family_id, caregiver_id)
+            if (
+                caregiver.role != MemberRole.CAREGIVER or caregiver.status != MemberStatus.ACTIVE
+                or not caregiver.available_for_scheduling
+            ):
+                raise WorkflowConflict("This caregiver is unavailable for new schedules")
+
+            contract.guardian_id = actor_id
+            contract.caregiver_id = caregiver_id
+            contract.status = ContractStatus.PENDING_APPROVAL
+            contract.approval_status = DecisionStatus.APPROVED
+            contract.acceptance_status = DecisionStatus.PENDING
+            contract.decline_reason = None
+            contract.version += 1
+            contract.updated_at = now
+            self._save_contract(connection, contract)
+            self._insert_audit_event(
+                connection, contract.family_id, actor_id, ActorType.USER,
+                "SCHEDULE_CAREGIVER_REQUESTED", contract.id, contract.id, now,
+            )
+            return contract
 
     def decide_approval(
         self,
@@ -630,18 +895,17 @@ class SQLiteStore:
             (proposal.id,),
         ).fetchall()
         approvals = [Approval.model_validate_json(row["payload"]) for row in approval_rows]
-        guardian_approved = any(
-            item.approval_type == ApprovalType.GUARDIAN
-            and item.status == DecisionStatus.APPROVED
-            for item in approvals
-        )
+        guardian_approval = next((
+            item for item in approvals
+            if item.approval_type == ApprovalType.GUARDIAN and item.status == DecisionStatus.APPROVED
+        ), None)
         caregiver_accepted = any(
             item.approval_type == ApprovalType.CAREGIVER
             and item.status == DecisionStatus.ACCEPTED
             for item in approvals
         )
 
-        if guardian_approved and caregiver_accepted:
+        if guardian_approval and caregiver_accepted:
             caregiver_row = connection.execute(
                 "SELECT payload FROM family_members WHERE id = ?",
                 (proposal.proposed_caregiver_id,),
@@ -661,7 +925,7 @@ class SQLiteStore:
                 or caregiver.status != MemberStatus.ACTIVE
                 or not self._caregiver_available_for(
                     connection,
-                    caregiver.id,
+                    caregiver,
                     contract.start_time,
                     contract.end_time,
                 )
@@ -679,6 +943,7 @@ class SQLiteStore:
                 family_id=contract.family_id,
                 child_id=contract.child_id,
                 caregiver_id=caregiver.id,
+                guardian_id=guardian_approval.approver_id,
                 activity=contract.activity,
                 expected_location=contract.expected_location,
                 start_time=contract.start_time,
@@ -702,7 +967,7 @@ class SQLiteStore:
             )
 
         proposal.status = (
-            ProposalStatus.APPROVED if guardian_approved else ProposalStatus.ACCEPTED
+            ProposalStatus.APPROVED if guardian_approval else ProposalStatus.ACCEPTED
         )
         self._save_proposal(connection, proposal)
         return ProposalDecisionResult(approval=approval, proposal=proposal)
@@ -788,13 +1053,15 @@ class SQLiteStore:
     def _caregiver_available_for(
         self,
         connection: sqlite3.Connection,
-        caregiver_id: str,
+        caregiver: FamilyMember,
         start_time: datetime,
         end_time: datetime,
     ) -> bool:
+        if not caregiver.available_for_scheduling:
+            return False
         rows = connection.execute(
             "SELECT payload FROM caregiver_availability WHERE caregiver_id = ?",
-            (caregiver_id,),
+            (caregiver.id,),
         ).fetchall()
         windows = [
             CaregiverAvailability.model_validate_json(row["payload"]) for row in rows
@@ -830,7 +1097,7 @@ class SQLiteStore:
                 and member.id != contract.caregiver_id
                 and self._caregiver_available_for(
                     connection,
-                    member.id,
+                    member,
                     contract.start_time,
                     contract.end_time,
                 )
@@ -976,6 +1243,7 @@ class SQLiteStore:
                 ContractStatus.ACTIVE,
                 ContractStatus.ESCALATED,
                 ContractStatus.CANCELLED,
+                ContractStatus.DECLINED,
                 ContractStatus.COMPLETED,
             }:
                 return contract
@@ -1016,8 +1284,7 @@ class SQLiteStore:
         *,
         proposal_id: Optional[str] = None,
     ) -> None:
-        # Prefer the failed proposal's assigned guardian, then the guardian who
-        # approved the contract if it was itself a replacement.
+        # Prefer the failed proposal's guardian, then the contract's guardian.
         guardian = connection.execute(
             """SELECT m.id FROM family_members AS m
                WHERE m.family_id = ? AND m.role = 'GUARDIAN'
@@ -1026,7 +1293,7 @@ class SQLiteStore:
                    SELECT 1 FROM approvals AS a
                    WHERE a.proposal_id = ? AND a.approver_id = m.id
                      AND a.approval_type = 'GUARDIAN'
-               ) DESC, EXISTS (
+               ) DESC, (m.id = ?) DESC, EXISTS (
                    SELECT 1 FROM audit_events AS e
                    JOIN approvals AS a ON a.proposal_id = e.correlation_id
                    WHERE e.resource_id = ?
@@ -1035,7 +1302,7 @@ class SQLiteStore:
                      AND a.status = 'APPROVED'
                ) DESC, m.id
                LIMIT 1""",
-            (contract.family_id, proposal_id, contract.id),
+            (contract.family_id, proposal_id, contract.guardian_id, contract.id),
         ).fetchone()
         if guardian is None:
             return
@@ -1170,6 +1437,7 @@ class SQLiteStore:
                 ContractStatus.CONFLICTED,
                 ContractStatus.ESCALATED,
                 ContractStatus.CANCELLED,
+                ContractStatus.DECLINED,
                 ContractStatus.COMPLETED,
             }:
                 raise CancellationConflict(
@@ -1196,7 +1464,7 @@ class SQLiteStore:
 
                 if self._caregiver_available_for(
                     connection,
-                    member.id,
+                    member,
                     contract.start_time,
                     contract.end_time,
                 ):
@@ -1207,6 +1475,7 @@ class SQLiteStore:
             proposal = None
             if candidates and guardians and contract.updated_at < contract.start_time:
                 contract.status = ContractStatus.CONFLICTED
+                guardian = next((member for member in guardians if member.id == contract.guardian_id), guardians[0])
                 proposal = SupervisionProposal(
                     id=f"proposal-{uuid4().hex}",
                     original_contract_id=contract.id,
@@ -1233,7 +1502,7 @@ class SQLiteStore:
                     Approval(
                         id=f"approval-{uuid4().hex}",
                         proposal_id=proposal.id,
-                        approver_id=guardians[0].id,
+                        approver_id=guardian.id,
                         approval_type=ApprovalType.GUARDIAN,
                     ),
                     Approval(

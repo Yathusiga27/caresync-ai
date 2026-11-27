@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from uuid import uuid4
 
 from ollama import ResponseError
@@ -23,6 +24,7 @@ from backend.models.supervision import (
     DecisionStatus,
     SupervisionContract,
 )
+from backend.schemas import AgentChatContext, ChatHistoryMessage
 from backend.store import store
 
 
@@ -161,8 +163,50 @@ class CareSyncAgentTests(unittest.TestCase):
         self.assertEqual(answer.model, "qwen3:4b")
         self.assertEqual(client.requests[0]["messages"][1]["role"], "user")
         self.assertEqual(len(client.requests[0]["tools"]), 3)
+        self.assertTrue(all(request["think"] is False for request in client.requests))
         self.assertFalse(client.requests[-1]["stream"])
         self.assertIn("properties", client.requests[-1]["format"])
+
+    def test_followup_includes_recent_conversation_before_current_question(self) -> None:
+        client = StubOllamaClient(responses=[response(), response('{"reply":"Check the start time."}')])
+        history = [
+            ChatHistoryMessage(role="user", content="What is a handover?"),
+            ChatHistoryMessage(role="assistant", content="A caregiver confirms supervision has started."),
+        ]
+        CareSyncAgent(client=client).respond("When can I do that?", history=history)
+        self.assertEqual(client.requests[0]["messages"][1:], [
+            *[entry.model_dump() for entry in history],
+            {"role": "user", "content": "When can I do that?"},
+        ])
+
+    def test_chat_with_selected_schedule_supplies_fresh_records_in_one_call(self) -> None:
+        client = StubOllamaClient(responses=[response('{"reply":"Library pickup."}')])
+        with patch("backend.agent.agent.dispatch_tool", side_effect=[
+            {"ok": True, "contract": {"activity": "Library pickup"}},
+            {"ok": True, "caregivers": []},
+        ]) as lookup:
+            answer = CareSyncAgent(client=client).respond(
+                "Summarize this schedule.", context=AgentChatContext(contract_id="contract-1"),
+            )
+        self.assertEqual(answer.reply, "Library pickup.")
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual([call.args for call in lookup.call_args_list], [
+            ("get_supervision_contract", {"contract_id": "contract-1"}),
+            ("list_available_caregivers", {"contract_id": "contract-1"}),
+        ])
+        self.assertIn("Library pickup", client.requests[0]["messages"][-1]["content"])
+
+    def test_general_chat_cannot_offer_a_schedule_specific_proposal(self) -> None:
+        client = StubOllamaClient(responses=[response(json.dumps({
+            "reply": "Choose a schedule to see current availability.",
+            "proposal": {"contract_id": "unrelated", "original_contract_version": 1,
+                         "proposed_caregiver_id": "caregiver-x", "reason": "Available"},
+        }))])
+        with patch("backend.agent.agent.dispatch_tool") as lookup:
+            answer = CareSyncAgent(client=client).respond("Who is available?", context=AgentChatContext())
+        lookup.assert_not_called()
+        self.assertIsNone(answer.proposal)
+        self.assertTrue(answer.proposal_validation_error)
 
     def test_executes_read_only_tool_and_sends_result_back(self) -> None:
         client = StubOllamaClient(

@@ -1,19 +1,39 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, StrictBool, ValidationInfo, field_validator
 
 from backend.models.supervision import (
     AvailabilitySource,
     AvailabilityStatus,
     CareSyncModel,
+    MemberRole,
 )
+
+
+class FamilyMemberCreate(CareSyncModel):
+    name: str = Field(min_length=1)
+    role: MemberRole
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("name must not be blank")
+        return name
+
+
+class CaregiverSchedulingUpdate(CareSyncModel):
+    actor_id: str = Field(min_length=1)
+    available_for_scheduling: StrictBool
 
 
 class ContractCreate(CareSyncModel):
     family_id: str
     child_id: str
     caregiver_id: str
+    guardian_id: Optional[str] = None
     activity: str = Field(min_length=1)
     expected_location: str = Field(min_length=1)
     start_time: datetime
@@ -61,8 +81,30 @@ class ApprovalDecisionRequest(CareSyncModel):
     actor_id: str = Field(min_length=1)
 
 
+class ScheduleDecisionRequest(ApprovalDecisionRequest):
+    decision: Literal["ACCEPTED", "DECLINED"]
+    reason: Optional[str] = Field(default=None, max_length=500)
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+
+class ScheduleCaregiverRequest(ApprovalDecisionRequest):
+    caregiver_id: str = Field(min_length=1)
+    expected_version: int = Field(ge=1)
+
+
+class ChatHistoryMessage(CareSyncModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class AgentChatContext(CareSyncModel):
+    contract_id: Optional[str] = Field(default=None, min_length=1, max_length=200)
+
+
 class AgentChatRequest(CareSyncModel):
     message: str = Field(min_length=1, max_length=4000)
+    history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=6)
+    context: Optional[AgentChatContext] = None
 
     @field_validator("message")
     @classmethod

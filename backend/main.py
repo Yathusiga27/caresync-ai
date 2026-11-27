@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import logging
 import os
 from uuid import uuid4
@@ -23,13 +22,18 @@ from backend.models.supervision import (
     SupervisionProposal,
     SupervisionContract,
     ProposalDecisionResult,
+    ScheduleRequest,
 )
 from backend.schemas import (
     ApprovalDecisionRequest,
     AgentChatRequest,
     AgentChatResponse,
     CaregiverAvailabilityCreate,
+    CaregiverSchedulingUpdate,
     ContractCreate,
+    FamilyMemberCreate,
+    ScheduleCaregiverRequest,
+    ScheduleDecisionRequest,
 )
 from backend.store import (
     PROPOSAL_EXPIRY_REASON,
@@ -113,6 +117,57 @@ def read_family_members(family_id: str) -> list[FamilyMember]:
 
 
 @app.post(
+    "/families/{family_id}/members",
+    response_model=FamilyMember,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_family_member(family_id: str, payload: FamilyMemberCreate) -> FamilyMember:
+    require_local_workflow_mode()
+    if store.get_family(family_id) is None:
+        raise HTTPException(status_code=404, detail="Family not found")
+    member = FamilyMember(id=f"member-{uuid4().hex}", family_id=family_id, **payload.model_dump())
+    store.create_family_member(member)
+    return member
+
+
+@app.patch(
+    "/families/{family_id}/members/{member_id}/scheduling-availability",
+    response_model=FamilyMember,
+)
+def update_caregiver_scheduling_availability(
+    family_id: str, member_id: str, payload: CaregiverSchedulingUpdate
+) -> FamilyMember:
+    require_local_workflow_mode()
+    if payload.actor_id != member_id:
+        raise HTTPException(status_code=403, detail="Caregivers can update only their own availability")
+    try:
+        return store.set_caregiver_scheduling_availability(
+            family_id, member_id, payload.available_for_scheduling
+        )
+    except WorkflowNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WorkflowConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/families/{family_id}/contracts", response_model=list[SupervisionContract])
+def read_family_contracts(family_id: str) -> list[SupervisionContract]:
+    require_local_workflow_mode()
+    if store.get_family(family_id) is None:
+        raise HTTPException(status_code=404, detail="Family not found")
+    return store.list_family_contracts(family_id)
+
+
+@app.get("/families/{family_id}/schedule-requests", response_model=list[ScheduleRequest])
+def read_family_schedule_requests(family_id: str, actor_id: str) -> list[ScheduleRequest]:
+    require_local_workflow_mode()
+    try:
+        return store.list_family_schedule_requests(family_id, actor_id)
+    except WorkflowNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post(
     "/caregivers/{caregiver_id}/availability",
     response_model=CaregiverAvailability,
     status_code=status.HTTP_201_CREATED,
@@ -171,10 +226,11 @@ def create_supervision_contract(payload: ContractCreate) -> SupervisionContract:
         id=f"contract-{uuid4().hex}",
         **payload.model_dump(),
         status=ContractStatus.PENDING_APPROVAL,
-        approval_status=DecisionStatus.PENDING,
-        acceptance_status=DecisionStatus.PENDING,
     )
-    store.create_contract(contract)
+    try:
+        store.create_contract(contract)
+    except WorkflowConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return contract
 
 
@@ -186,19 +242,41 @@ def read_supervision_contract(contract_id: str) -> SupervisionContract:
     return contract
 
 
+@app.post("/supervision/contracts/{contract_id}/schedule-decisions", response_model=SupervisionContract)
+def decide_schedule(contract_id: str, payload: ScheduleDecisionRequest) -> SupervisionContract:
+    require_local_workflow_mode()
+    try:
+        return store.record_schedule_decision(
+            contract_id, payload.actor_id, DecisionStatus(payload.decision),
+            reason=payload.reason, expected_version=payload.expected_version,
+        )
+    except WorkflowNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WorkflowConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/supervision/contracts/{contract_id}/request-caregiver", response_model=SupervisionContract)
+def request_schedule_caregiver(contract_id: str, payload: ScheduleCaregiverRequest) -> SupervisionContract:
+    require_local_workflow_mode()
+    try:
+        return store.request_schedule_caregiver(
+            contract_id, payload.actor_id, payload.caregiver_id, payload.expected_version,
+        )
+    except WorkflowNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WorkflowConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 @app.post("/supervision/contracts/{contract_id}/cancel", response_model=SupervisionContract)
 def cancel_supervision_contract(contract_id: str) -> SupervisionContract:
-    contract = store.get_contract(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail="Supervision contract not found")
-    if contract.status in (ContractStatus.COMPLETED, ContractStatus.CANCELLED):
-        raise HTTPException(status_code=409, detail="Contract cannot be cancelled in its current state")
-
-    contract.status = ContractStatus.CANCELLED
-    contract.version += 1
-    contract.updated_at = datetime.now(timezone.utc)
-    store.save_contract(contract)
-    return contract
+    try:
+        return store.cancel_contract(contract_id)
+    except WorkflowNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WorkflowConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.get(
@@ -238,7 +316,7 @@ def receive_agent_event(event: CaregiverCancellationEvent) -> CancellationOutcom
 def chat_with_agent(payload: AgentChatRequest) -> AgentChatResponse:
     require_local_workflow_mode()
     try:
-        return agent.respond(payload.message)
+        return agent.respond(payload.message, history=payload.history, context=payload.context)
     except AgentUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AgentOutputError as error:
