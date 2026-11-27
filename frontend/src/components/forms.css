@@ -1,0 +1,141 @@
+.dialog-header,
+.form-actions {
+  display: flex;
+  align-items: center;
+}
+
+.dialog-header {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.button.icon-button {
+  width: 42px;
+  padding: 0;
+  flex: none;
+}
+
+.workspace-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(590px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  margin: auto;
+  overflow-y: auto;
+  border: 1px solid var(--color-line);
+  border-radius: 18px;
+  padding: clamp(17px, 4vw, 26px);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  box-shadow: 0 24px 70px #142e2b35;
+}
+
+.workspace-dialog::backdrop {
+  background: #142e2b66;
+}
+
+.dialog-header {
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.dialog-header h2 {
+  font-size: 25px;
+  font-weight: 730;
+  letter-spacing: -0.045em;
+  overflow-wrap: anywhere;
+}
+
+.dialog-header p {
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 14px;
+}
+
+.workspace-form,
+.form-grid,
+.form-field {
+  display: grid;
+  gap: 12px;
+}
+
+.form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-field {
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 9px;
+  background: var(--care-field);
+  font-size: 14px;
+  font-weight: 450;
+}
+
+.form-field input[readonly] {
+  background: var(--color-canvas);
+}
+
+.form-actions {
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.form-error,
+.form-success {
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+
+.form-error {
+  background: var(--care-alert);
+  color: var(--care-alert-ink);
+}
+
+.form-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--color-mint);
+  color: var(--color-accent-dark);
+}
+
+.form-success svg {
+  flex: none;
+}
+
+.workspace-dialog .form-success,
+.workspace-dialog .workspace-form {
+  margin-top: 14px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .form-success {
+    animation: response-arrive 180ms ease-out both;
+  }
+}
+
+@keyframes response-arrive {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 560px) {
+  .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

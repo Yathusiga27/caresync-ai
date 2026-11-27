@@ -3,32 +3,47 @@ import {
   ArrowLeft,
   ArrowRight,
   Bell,
+  Bot,
   CalendarDays,
   CalendarRange,
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   ClipboardCheck,
   FlaskConical,
   HeartHandshake,
   House,
-  MessageCircle,
+  Monitor,
+  Moon,
+  Sun,
+  PanelLeftClose,
+  PanelLeftOpen,
+  CircleUserRound,
   UsersRound,
 } from 'lucide-react'
 import { Link, NavLink, Route, Routes, useLocation } from 'react-router'
-import { Button, Card, EmptyState, StatusIndicator } from './components/ui.jsx'
+import Approvals from './Approvals.jsx'
+import FamilyMembers from './FamilyMembers.jsx'
+import Notifications from './Notifications.jsx'
+import OverviewData from './OverviewData.jsx'
+import AssistantChat from './AssistantChat.jsx'
+import { AccountAccess, AccountSettings } from './Account.jsx'
+import SchedulePage, { PersonalSchedules, TodaySchedule } from './Schedule.jsx'
+import { Button, Card } from './components/ui.jsx'
+import { Bear } from './components/BearIllustration.jsx'
+import { loadFamilyContracts, loadFamilyMembers, memberDisplayName, roleLabels, scheduleRefreshMs } from './familyApi.js'
+import { useResource } from './useResource.js'
 
 const sections = [
   { path: '/', label: 'Overview', title: 'Family overview', icon: House },
+  { path: '/family', label: 'Family members', shortLabel: 'Family', title: 'Family members', icon: UsersRound },
   {
     path: '/schedule',
     label: 'Supervision Schedule',
     shortLabel: 'Schedule',
     title: 'Supervision schedule',
     icon: CalendarRange,
-    description: 'See planned supervision and upcoming handovers.',
-    emptyTitle: 'Schedule data pending',
-    emptyDescription: 'Daily and weekly views will use supervision contracts from FastAPI.',
   },
   {
     path: '/approvals',
@@ -36,8 +51,6 @@ const sections = [
     title: 'Approvals',
     icon: ClipboardCheck,
     description: 'Review replacement proposals and see who still needs to respond.',
-    emptyTitle: 'Approval requests pending integration',
-    emptyDescription: 'Guardian decisions and caregiver responses will appear here.',
     shortcut: 'Review requests and responses',
     accent: 'amber',
   },
@@ -46,10 +59,7 @@ const sections = [
     label: 'CareSync AI Chat',
     shortLabel: 'AI Chat',
     title: 'CareSync AI Chat',
-    icon: MessageCircle,
-    description: 'Ask about supervision plans and caregiver availability.',
-    emptyTitle: 'Chat connection pending',
-    emptyDescription: 'This space will connect to the local Ollama assistant through FastAPI.',
+    icon: Bot,
     shortcut: 'Ask about supervision plans',
     accent: 'lavender',
   },
@@ -59,15 +69,12 @@ const sections = [
     shortLabel: 'Notices',
     title: 'Notifications',
     icon: Bell,
-    description: 'Review guardian notices and supervision activity.',
-    emptyTitle: 'Inbox data pending',
-    emptyDescription: 'Escalation notices and coordination activity will appear here.',
     shortcut: 'Review family notices',
     accent: 'teal',
   },
+  { path: '/account', label: 'My account', shortLabel: 'Account', title: 'My account', icon: CircleUserRound },
 ]
 
-const demoRoles = ['Mother', 'Father', 'Grandmother']
 const dateFormatter = new Intl.DateTimeFormat('en', {
   weekday: 'long',
   month: 'long',
@@ -78,36 +85,82 @@ function Brand() {
   return (
     <Link to="/" className="brand" aria-label="CareSync AI overview">
       <span className="brand-mark"><HeartHandshake size={23} strokeWidth={1.85} aria-hidden="true" /></span>
-      <span>CareSync <span className="brand-ai">AI</span></span>
+      <span className="brand-name">CareSync <span className="brand-ai">AI</span></span>
     </Link>
   )
 }
 
-function Sidebar() {
+function Sidebar({ collapsed, onToggle }) {
+  const toggleLabel = collapsed ? 'Expand preview sidebar' : 'Minimize preview sidebar'
+  const DesktopToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose
+  const MobileToggleIcon = collapsed ? ChevronDown : ChevronUp
+
   return (
     <aside className="sidebar">
-      <div className="sidebar-brand"><Brand /></div>
-      <nav className="navigation" aria-label="Main navigation">
+      <div className="sidebar-header">
+        <div className="sidebar-brand"><Brand /></div>
+        <Button variant="secondary" className="sidebar-toggle" onClick={onToggle}
+          aria-label={toggleLabel} title={toggleLabel} aria-expanded={!collapsed}
+          aria-controls="preview-navigation">
+          <DesktopToggleIcon className="sidebar-toggle-desktop" size={18} aria-hidden="true" />
+          <MobileToggleIcon className="sidebar-toggle-mobile" size={18} aria-hidden="true" />
+        </Button>
+      </div>
+      <nav id="preview-navigation" className="navigation" aria-label="Main navigation">
         {sections.map(({ path, label, shortLabel, icon: Icon }) => (
-          <NavLink key={path} to={path} end aria-label={label} className="nav-link">
+          <NavLink key={path} to={path} end aria-label={label} title={collapsed ? label : undefined} className="nav-link">
             <Icon size={19} strokeWidth={1.8} aria-hidden="true" />
             <span className="nav-label">{label}</span>
             <span className="nav-short-label" aria-hidden="true">{shortLabel || label}</span>
           </NavLink>
         ))}
       </nav>
-      <div className="demo-note">
-        <FlaskConical size={17} strokeWidth={1.8} aria-hidden="true" />
-        <div>
-          <p>Local demo</p>
-          <span>Demo roles are for preview only.</span>
+      <div className="sidebar-footer">
+        <div className="sidebar-art" aria-hidden="true">
+          <span className="sidebar-art-calendar"><CalendarDays size={34} strokeWidth={1.55} /></span>
+          <span className="sidebar-art-care"><HeartHandshake size={18} strokeWidth={1.7} /></span>
+          <span className="sidebar-art-check"><Check size={18} strokeWidth={2.15} /></span>
+        </div>
+        <div className="preview-note">
+          <FlaskConical size={17} strokeWidth={1.8} aria-hidden="true" />
+          <div>
+            <p>Local preview</p>
+            <span>Choose a family member to test their workflow.</span>
+          </div>
         </div>
       </div>
     </aside>
   )
 }
 
-function Header({ role, onRoleChange }) {
+function AppearancePicker() {
+  const [mode, setMode] = useState(() => document.documentElement.dataset.appearance || 'system')
+  const Icon = { light: Sun, dark: Moon, system: Monitor }[mode]
+
+  function changeMode(event) {
+    const next = event.target.value
+    document.documentElement.dataset.appearance = next
+    setMode(next)
+    try {
+      localStorage.setItem('caresync-appearance', next)
+    } catch {
+      // The selection still applies to this tab when storage is unavailable.
+    }
+  }
+
+  return (
+    <label className="appearance-picker" title={`Appearance (${mode})`}>
+      <Icon size={17} aria-hidden="true" />
+      <select aria-label="Appearance" value={mode} onChange={changeMode}>
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  )
+}
+
+function Header({ actor, people, onActorChange }) {
   return (
     <header className="workspace-header">
       <div className="mobile-brand"><Brand /></div>
@@ -115,21 +168,26 @@ function Header({ role, onRoleChange }) {
         <CalendarDays size={17} strokeWidth={1.8} aria-hidden="true" />
         {dateFormatter.format(new Date())}
       </div>
+      <AppearancePicker />
       <label className="role-control">
-        <span className="role-label">Demo role</span>
+        <span className="role-label">Preview as</span>
         <span className="role-select">
-          <span className="role-avatar" aria-hidden="true">{role[0]}</span>
+          <span className="role-avatar" aria-hidden="true">{actor ? memberDisplayName(actor)[0] : '–'}</span>
           <select
-            aria-describedby="demo-role-help"
-            value={role}
-            onChange={(event) => onRoleChange(event.target.value)}
+            aria-describedby="preview-role-help"
+            value={actor?.id || ''}
+            onChange={(event) => onActorChange(event.target.value)}
+            disabled={!people.length}
           >
-            {demoRoles.map((option) => <option key={option}>{option}</option>)}
+            {!people.length && <option value="">No family member</option>}
+            {people.map((member) => (
+              <option key={member.id} value={member.id}>{memberDisplayName(member)} · {roleLabels[member.role]}</option>
+            ))}
           </select>
           <ChevronDown className="role-chevron" size={15} aria-hidden="true" />
         </span>
       </label>
-      <span id="demo-role-help" className="sr-only">Changes the local demo role. It grants no permissions.</span>
+      <span id="preview-role-help" className="sr-only">Select a local preview identity.</span>
     </header>
   )
 }
@@ -147,13 +205,13 @@ function PlannerArt() {
           <span />
         </div>
       </div>
-      <span className="planner-float planner-float-people"><UsersRound size={21} strokeWidth={1.8} /></span>
+      <Bear cub />
       <span className="planner-float planner-float-check"><Check size={25} strokeWidth={2.2} /></span>
     </div>
   )
 }
 
-function Overview() {
+function Overview({ actor, members, contracts, onUpdated }) {
   return (
     <div className="overview">
       <section className="hero" aria-labelledby="overview-title">
@@ -165,19 +223,13 @@ function Overview() {
         <PlannerArt />
       </section>
 
+      <OverviewData actor={actor} members={members} />
+
+      {(actor?.role === 'GUARDIAN' || actor?.role === 'CAREGIVER') && (
+        <PersonalSchedules key={actor.id} actor={actor} members={members} contracts={contracts} onUpdated={onUpdated} />
+      )}
       <div className="overview-grid">
-        <Card aria-labelledby="today-title">
-          <div className="card-header">
-            <h2 id="today-title">Today’s supervision</h2>
-            <StatusIndicator tone="teal">Preview</StatusIndicator>
-          </div>
-          <EmptyState
-            icon={CalendarRange}
-            title="Supervision data pending"
-            description="Scheduled plans and caregiver assignments will appear when this dashboard connects to FastAPI."
-            heading="h3"
-          />
-        </Card>
+        <TodaySchedule actor={actor} members={members} contracts={contracts} onUpdated={onUpdated} />
         <Card aria-labelledby="quick-access-title">
           <div className="card-header"><h2 id="quick-access-title">Quick access</h2></div>
           <ul className="quick-links">
@@ -202,20 +254,6 @@ function Overview() {
   )
 }
 
-function SectionPage({ section }) {
-  return (
-    <div className="section-page">
-      <div className="page-heading">
-        <h1>{section.title}</h1>
-        <p>{section.description}</p>
-      </div>
-      <Card>
-        <EmptyState icon={section.icon} title={section.emptyTitle} description={section.emptyDescription} />
-      </Card>
-    </div>
-  )
-}
-
 function NotFound() {
   return (
     <div className="section-page">
@@ -225,30 +263,66 @@ function NotFound() {
   )
 }
 
-export default function App() {
-  const [demoRole, setDemoRole] = useState('Mother')
+function Workspace({ previewActorId, setPreviewActorId, profiles, saveProfile }) {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const members = useResource(loadFamilyMembers)
+  const people = (members.data || []).filter(({ status }) => status === 'ACTIVE')
+  const actor = people.find(({ id }) => id === previewActorId) ?? people[0]
   const { pathname } = useLocation()
+  const currentPath = pathname.replace(/\/+$/, '') || '/'
+  const refreshSchedules = currentPath === '/' || currentPath === '/schedule' || currentPath === '/approvals'
+  const contracts = useResource(loadFamilyContracts, { refreshMs: refreshSchedules ? scheduleRefreshMs : 0 })
+
+  function onScheduleUpdated(updated) {
+    if (contracts.status !== 'ready') {
+      contracts.retry()
+      return
+    }
+    contracts.updateData((items) => {
+      if (items.some((item) => item.id === updated.id)) {
+        return items.map((item) => item.id === updated.id && item.version <= updated.version ? updated : item)
+      }
+      return [...items, updated].sort((a, b) => new Date(a.start_time) - new Date(b.start_time) || a.id.localeCompare(b.id))
+    })
+  }
 
   useEffect(() => {
-    const currentPath = pathname.replace(/\/+$/, '') || '/'
     const title = sections.find(({ path }) => path === currentPath)?.title
     document.title = `${title || 'Page not found'} | CareSync AI`
-  }, [pathname])
+  }, [currentPath])
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-sidebar-collapsed={sidebarCollapsed}>
       <a href="#main-content" className="skip-link">Skip to content</a>
-      <Header role={demoRole} onRoleChange={setDemoRole} />
-      <Sidebar />
+      <Header actor={actor} people={people} onActorChange={setPreviewActorId} />
+      <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((collapsed) => !collapsed)} />
       <main id="main-content" className="workspace-content" tabIndex={-1}>
         <Routes>
-          <Route path="/" element={<Overview />} />
-          {sections.slice(1).map((section) => (
-            <Route key={section.path} path={section.path} element={<SectionPage section={section} />} />
-          ))}
+          <Route path="/" element={<Overview actor={actor} members={members} contracts={contracts} onUpdated={onScheduleUpdated} />} />
+          <Route path="/family" element={<FamilyMembers actor={actor} members={members} />} />
+          <Route path="/schedule" element={<SchedulePage actor={actor} members={members} contracts={contracts} onUpdated={onScheduleUpdated} />} />
+          <Route path="/approvals" element={<Approvals actor={actor} members={members} contracts={contracts} onUpdated={onScheduleUpdated} />} />
+          <Route path="/notifications" element={<Notifications actor={actor} />} />
+          <Route path="/chat" element={<AssistantChat key={actor?.id || 'guest'} contracts={contracts} members={people} />} />
+          <Route path="/account" element={<AccountSettings key={actor?.id || 'guest'} actor={actor}
+            members={members} profile={profiles[actor?.id]} onSave={(profile) => saveProfile(actor.id, profile)} />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>
     </div>
+  )
+}
+
+export default function App() {
+  const [previewActorId, setPreviewActorId] = useState('guardian-demo')
+  const [profiles, setProfiles] = useState({})
+  const accessPage = (mode) => <AccountAccess key={mode} mode={mode} brand={<Brand />} appearance={<AppearancePicker />} />
+  return (
+    <Routes>
+      <Route path="/sign-in" element={accessPage('signin')} />
+      <Route path="/sign-up" element={accessPage('signup')} />
+      <Route path="*" element={<Workspace previewActorId={previewActorId} setPreviewActorId={setPreviewActorId}
+        profiles={profiles} saveProfile={(id, profile) => setProfiles((current) => ({ ...current, [id]: profile }))} />} />
+    </Routes>
   )
 }

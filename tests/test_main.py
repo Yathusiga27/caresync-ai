@@ -86,6 +86,126 @@ class HealthEndpointTests(unittest.TestCase):
         })
         self.assertEqual(len(members.json()), 4)
 
+    def test_new_family_members_can_be_used_for_scheduling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "members.db")
+            database = SQLiteStore(path, environment="test")
+            with patch("backend.main.store", database):
+                endpoint = "/families/family-demo/members"
+                caregiver = self.client.post(endpoint, json={"name": "  Avery  ", "role": "CAREGIVER"})
+                child = self.client.post(endpoint, json={"name": "Casey", "role": "CHILD"})
+                self.assertEqual(caregiver.status_code, 201, caregiver.text)
+                self.assertEqual(child.status_code, 201, child.text)
+                self.assertEqual(caregiver.json()["name"], "Avery")
+                self.assertEqual(caregiver.json()["status"], "ACTIVE")
+                self.assertIn(caregiver.json(), self.client.get(endpoint).json())
+
+                contract = self.client.post("/supervision/contracts", json={
+                    "family_id": "family-demo", "child_id": child.json()["id"],
+                    "caregiver_id": caregiver.json()["id"], "activity": "School pickup",
+                    "expected_location": "School entrance", "start_time": "2027-01-10T14:00:00+05:30",
+                    "end_time": "2027-01-10T15:00:00+05:30",
+                })
+                self.assertEqual(contract.status_code, 201, contract.text)
+                self.assertEqual(contract.json()["caregiver_id"], caregiver.json()["id"])
+
+            reopened = SQLiteStore(path, environment="production")
+            self.assertEqual(reopened.get_member(caregiver.json()["id"]).role, "CAREGIVER")
+
+    def test_create_family_member_validates_family_name_and_role(self) -> None:
+        endpoint = "/families/family-demo/members"
+        for payload in ({"name": "  ", "role": "CAREGIVER"}, {"name": "Avery", "role": "UNKNOWN"}):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.client.post(endpoint, json=payload).status_code, 422)
+        payload = {"name": "Avery", "role": "GUARDIAN"}
+        self.assertEqual(self.client.post("/families/unknown/members", json=payload).status_code, 404)
+        with patch.object(store, "environment", "production"):
+            self.assertEqual(self.client.post(endpoint, json=payload).status_code, 501)
+
+    def test_unavailable_caregiver_cannot_be_assigned_but_can_confirm_existing_handover(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "scheduling-availability.db")
+            database = SQLiteStore(path, environment="test")
+            existing = self._make_handover_contract(database=database)
+            url = "/families/family-demo/members/caregiver-demo/scheduling-availability"
+            disabled = {"actor_id": "caregiver-demo", "available_for_scheduling": False}
+            contract_payload = {
+                "family_id": "family-demo", "child_id": "child-demo",
+                "caregiver_id": "caregiver-demo", "activity": "School pickup",
+                "expected_location": "School entrance", "start_time": "2027-01-10T14:00:00+05:30",
+                "end_time": "2027-01-10T15:00:00+05:30",
+            }
+
+            with patch("backend.main.store", database):
+                self.assertTrue(database.get_member("caregiver-demo").available_for_scheduling)
+                for other_actor in ("guardian-demo", "caregiver-alt-demo"):
+                    unauthorized = self.client.patch(url, json={**disabled, "actor_id": other_actor})
+                    self.assertEqual(unauthorized.status_code, 403, unauthorized.text)
+                self.assertTrue(database.get_member("caregiver-demo").available_for_scheduling)
+                self.assertEqual(
+                    self.client.patch(url, json={"available_for_scheduling": False}).status_code, 422
+                )
+                updated = self.client.patch(url, json=disabled)
+                self.assertEqual(updated.status_code, 200, updated.text)
+                self.assertFalse(updated.json()["available_for_scheduling"])
+                self.assertEqual(updated.json()["status"], "ACTIVE")
+                reopened = SQLiteStore(path, environment="production")
+                self.assertFalse(reopened.get_member("caregiver-demo").available_for_scheduling)
+                rejected = self.client.post("/supervision/contracts", json=contract_payload)
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+
+                handover = self.client.post(
+                    f"/supervision/contracts/{existing.id}/confirm-handover",
+                    json={"actor_id": "caregiver-demo"},
+                )
+                self.assertEqual(handover.status_code, 200, handover.text)
+                self.assertEqual(handover.json()["status"], "ACTIVE")
+
+                enabled = self.client.patch(url, json={**disabled, "available_for_scheduling": True})
+                self.assertEqual(enabled.status_code, 200, enabled.text)
+                self.assertEqual(self.client.post("/supervision/contracts", json=contract_payload).status_code, 201)
+                self.assertEqual(
+                    self.client.patch(url, json={**disabled, "available_for_scheduling": "false"}).status_code,
+                    422,
+                )
+                self.assertEqual(self.client.patch(url.replace("family-demo", "family-other"), json=disabled).status_code, 404)
+                self.assertEqual(
+                    self.client.patch(url.replace("caregiver-demo", "child-demo"),
+                                      json={**disabled, "actor_id": "child-demo"}).status_code,
+                    409,
+                )
+
+    def test_unavailable_caregiver_is_excluded_from_replacements(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = SQLiteStore(os.path.join(directory, "replacement-availability.db"), environment="test")
+            with patch("backend.main.store", database):
+                contract, proposal = self._make_proposal("08-22", "before-availability-toggle")
+                approval = self._approval_for(proposal["id"], "GUARDIAN")
+                updated = self.client.patch(
+                    "/families/family-demo/members/caregiver-alt-demo/scheduling-availability",
+                    json={"actor_id": "caregiver-alt-demo", "available_for_scheduling": False},
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                self.assertEqual(database.list_available_caregivers_for_contract(contract["id"]), [])
+                self.assertFalse(database.validate_replacement_candidate(
+                    contract["id"], "caregiver-alt-demo", proposal["original_contract_version"]
+                )["valid"])
+
+                second = self._create_contract(contract["start_time"], contract["end_time"])
+                outcome = self._submit_cancellation(second["id"], "after-availability-toggle")
+                self.assertEqual(outcome["contract_status"], "ESCALATED")
+                self.assertIsNone(outcome["proposal"])
+
+                approved = self.client.post(
+                    f"/approvals/{approval['id']}/approve", json={"actor_id": "guardian-demo"},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                acceptance = self.client.post(
+                    f"/proposals/{proposal['id']}/accept", json={"actor_id": "caregiver-alt-demo"},
+                )
+                self.assertEqual(acceptance.status_code, 409, acceptance.text)
+                self.assertEqual(database.list_proposals(contract["id"])[0].status, "INVALIDATED")
+
     def _create_contract(self, start_time: str, end_time: str) -> dict:
         response = self.client.post(
             "/supervision/contracts",
@@ -274,6 +394,146 @@ class HealthEndpointTests(unittest.TestCase):
         original_version = reopened_store.get_contract_version(contract["id"], 1)
         self.assertIsNotNone(original_version)
         self.assertEqual(original_version.status, "PENDING_APPROVAL")
+
+    def test_family_schedule_lists_contracts_in_chronological_order(self) -> None:
+        later = self._create_contract("2027-01-05T08:00:00Z", "2027-01-05T09:00:00Z")
+        earlier = self._create_contract(
+            "2027-01-05T11:00:00+05:30", "2027-01-05T12:00:00+05:30"
+        )
+        endpoint = "/families/family-demo/contracts"
+        response = self.client.get(endpoint)
+        self.assertEqual(response.status_code, 200, response.text)
+        contracts = response.json()
+        self.assertTrue(all(contract["family_id"] == "family-demo" for contract in contracts))
+        added = [contract for contract in contracts if contract["id"] in {earlier["id"], later["id"]}]
+        self.assertEqual(added, [earlier, later])
+        self.assertEqual(self.client.get("/families/unknown/contracts").status_code, 404)
+        with patch.object(store, "environment", "production"):
+            self.assertEqual(self.client.get(endpoint).status_code, 501)
+
+    def test_initial_schedule_confirms_when_the_assigned_caregiver_accepts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = SQLiteStore(os.path.join(directory, "initial-schedule.db"), environment="test")
+            with patch("backend.main.store", database):
+                guardian = self.client.post("/families/family-demo/members", json={
+                    "name": "Avery", "role": "GUARDIAN",
+                }).json()
+                now = datetime.now(timezone.utc)
+                request = self.client.post("/supervision/contracts", json={
+                    "family_id": "family-demo", "child_id": "child-demo",
+                    "guardian_id": guardian["id"], "caregiver_id": "caregiver-alt-demo",
+                    "activity": "School pickup", "expected_location": "School",
+                    "start_time": (now - timedelta(minutes=5)).isoformat(),
+                    "end_time": (now + timedelta(minutes=30)).isoformat(),
+                })
+                self.assertEqual(request.status_code, 201, request.text)
+                contract = request.json()
+                self.assertEqual(contract["approval_status"], "APPROVED")
+                endpoint = f"/supervision/contracts/{contract['id']}/schedule-decisions"
+                queue = "/families/family-demo/schedule-requests"
+
+                guardian_queue = self.client.get(queue, params={"actor_id": guardian["id"]}).json()
+                caregiver_queue = self.client.get(queue, params={"actor_id": "caregiver-alt-demo"}).json()
+                self.assertEqual(guardian_queue, [])
+                self.assertEqual(caregiver_queue[0]["approval_type"], "CAREGIVER")
+                self.assertEqual(self.client.get(queue, params={"actor_id": "guardian-demo"}).json(), [])
+                wrong_guardian = self.client.post(endpoint, json={
+                    "actor_id": guardian["id"], "decision": "ACCEPTED",
+                })
+                self.assertEqual(wrong_guardian.status_code, 409)
+
+                accepted = self.client.post(endpoint, json={
+                    "actor_id": "caregiver-alt-demo", "decision": "ACCEPTED",
+                    "expected_version": contract["version"],
+                })
+                self.assertEqual(accepted.status_code, 200, accepted.text)
+                self.assertEqual(accepted.json()["status"], "CONFIRMED")
+                self.assertEqual(accepted.json()["id"], contract["id"])
+                self.assertEqual(self.client.get(queue, params={"actor_id": "caregiver-alt-demo"}).json(), [])
+
+                handover = self.client.post(
+                    f"/supervision/contracts/{contract['id']}/confirm-handover",
+                    json={"actor_id": "caregiver-alt-demo"},
+                )
+                self.assertEqual(handover.status_code, 200, handover.text)
+                self.assertEqual(handover.json()["status"], "ACTIVE")
+                self.assertCountEqual(
+                    [event.action for event in database.list_audit_events(contract["id"])],
+                    ["SCHEDULE_CAREGIVER_ACCEPTED", "SCHEDULE_CONFIRMED", "HANDOVER_CONFIRMED"],
+                )
+
+    def test_declined_schedule_can_be_requested_again_by_its_guardian(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = SQLiteStore(os.path.join(directory, "declined-schedule.db"), environment="test")
+            with patch("backend.main.store", database):
+                start = datetime.now(timezone.utc) + timedelta(days=1)
+                contract = self._create_contract(start.isoformat(), (start + timedelta(hours=1)).isoformat())
+                detail = f"/supervision/contracts/{contract['id']}"
+                queue = "/families/family-demo/schedule-requests"
+                declined = self.client.post(f"{detail}/schedule-decisions", json={
+                    "actor_id": "caregiver-demo", "decision": "DECLINED", "reason": "  Away that afternoon.  ",
+                })
+                self.assertEqual(declined.status_code, 200, declined.text)
+                declined = declined.json()
+                self.assertEqual(declined["status"], "DECLINED")
+                self.assertEqual(declined["decline_reason"], "Away that afternoon.")
+                self.assertEqual(self.client.get(queue, params={"actor_id": "caregiver-demo"}).json(), [])
+                request = {"actor_id": "guardian-demo", "caregiver_id": "caregiver-alt-demo",
+                           "expected_version": declined["version"]}
+                path = f"{detail}/request-caregiver"
+                for invalid in ({"actor_id": "caregiver-demo"}, {"caregiver_id": "caregiver-demo"},
+                                {"expected_version": contract["version"]}):
+                    self.assertEqual(self.client.post(path, json={**request, **invalid}).status_code, 409)
+                resent = self.client.post(path, json=request)
+                self.assertEqual(resent.status_code, 200, resent.text)
+                resent = resent.json()
+                self.assertEqual(resent["id"], contract["id"])
+                self.assertEqual(resent["start_time"], contract["start_time"])
+                self.assertEqual(resent["caregiver_id"], "caregiver-alt-demo")
+                self.assertEqual(resent["acceptance_status"], "PENDING")
+                self.assertIsNone(resent["decline_reason"])
+                previous = database.get_contract_version(contract["id"], declined["version"])
+                self.assertEqual(previous.decline_reason, "Away that afternoon.")
+                self.assertEqual(self.client.post(path, json=request).status_code, 409)
+                pending = self.client.get(queue, params={"actor_id": "caregiver-alt-demo"}).json()
+                self.assertEqual([item["contract"]["id"] for item in pending], [contract["id"]])
+                response_path = f"{detail}/schedule-decisions"
+                self.assertEqual(self.client.post(response_path, json={
+                    "actor_id": "caregiver-demo", "decision": "ACCEPTED",
+                }).status_code, 409)
+                self.assertEqual(self.client.post(response_path, json={
+                    "actor_id": "caregiver-alt-demo", "decision": "ACCEPTED",
+                    "expected_version": declined["version"],
+                }).status_code, 409)
+                second_decline = self.client.post(response_path, json={
+                    "actor_id": "caregiver-alt-demo", "decision": "DECLINED",
+                    "expected_version": resent["version"],
+                })
+                self.assertEqual(second_decline.status_code, 200, second_decline.text)
+                self.assertIsNone(second_decline.json()["decline_reason"])
+
+    def test_legacy_schedule_waiting_for_guardian_confirmation_is_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "legacy-schedule.db")
+            database = SQLiteStore(path, environment="test")
+            with patch("backend.main.store", database):
+                start = datetime.now(timezone.utc) + timedelta(days=1)
+                contract = self._create_contract(start.isoformat(), (start + timedelta(hours=1)).isoformat())
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute(
+                        """UPDATE supervision_contracts
+                           SET payload = json_set(json_remove(payload, '$.guardian_id'),
+                               '$.approval_status', 'PENDING', '$.acceptance_status', 'ACCEPTED')
+                           WHERE id = ?""",
+                        (contract["id"],),
+                    )
+                reopened = SQLiteStore(path, environment="test")
+                migrated = reopened.get_contract(contract["id"])
+                self.assertEqual(migrated.status, "CONFIRMED")
+                self.assertEqual(migrated.guardian_id, "guardian-demo")
+                self.assertEqual(migrated.version, contract["version"] + 1)
+                reopened_again = SQLiteStore(path, environment="test")
+                self.assertEqual(reopened_again.get_contract(contract["id"]), migrated)
 
     def test_family_and_members_are_persisted(self) -> None:
         reopened_store = SQLiteStore(

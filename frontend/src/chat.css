@@ -1,0 +1,56 @@
+.chat-card {
+  display: grid;
+  gap: 16px;
+  padding: clamp(16px, 3vw, 28px);
+}
+
+.chat-toolbar, .chat-send, .chat-message strong, .chat-toolbar label span, .chat-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-toolbar, .chat-send { justify-content: space-between; }
+.chat-toolbar { align-items: end; flex-wrap: wrap; }
+.chat-toolbar label { width: min(100%, 32rem); }
+.chat-starters {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: clamp(18px, 3vw, 32px);
+  border-radius: 15px;
+  background: linear-gradient(120deg, var(--chat-mist), var(--color-surface));
+  border: 1px solid var(--color-line);
+  color: var(--color-accent-dark);
+}
+.chat-starters h2 { color: var(--color-ink); font-size: 20px; font-weight: 680; }
+.chat-starters > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-log { display: grid; gap: 16px; max-height: 52dvh; overflow-y: auto; }
+.chat-log:empty { display: none; }
+.chat-turn { display: grid; gap: 10px; min-width: 0; }
+.chat-message {
+  width: fit-content;
+  max-width: min(92%, 75ch);
+  padding: 12px 16px;
+  border-radius: 14px;
+  overflow-wrap: anywhere;
+}
+.chat-message strong { font-size: 14px; flex-wrap: wrap; }
+.chat-message p { margin-top: 4px; white-space: pre-wrap; }
+.chat-message small, .chat-send small, .chat-wait { color: var(--color-muted); font-size: 12px; }
+.chat-page { --chat-mist: light-dark(#dceee9, #233e3a); }
+.user-message {
+  justify-self: end;
+  background: light-dark(#225b50, #305f53);
+  color: #f5fcf7;
+}
+.user-message small { color: #d4eadf; }
+.assistant-message { background: var(--chat-mist); border: 1px solid var(--color-line); }
+.chat-suggestion, .chat-validation {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 9px;
+  background: var(--care-field);
+}
+.chat-composer { display: grid; gap: 10px; border-top: 1px solid var(--color-line); padding-top: 14px; }
+.chat-validation { color: var(--care-ochre); background: var(--care-sand); }
+.chat-composer textarea { resize: vertical; max-height: 30dvh; }

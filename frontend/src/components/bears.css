@@ -1,0 +1,248 @@
+/* The figures use em units so the same drawing fits the banner and planner. */
+.bear {
+  --fur: #ce946b;
+  --inner-ear: #91624e;
+  --coat: #a4ceb1;
+  --scarf: #f3c474;
+  display: inline-block;
+  position: relative;
+  width: 5.4em;
+  height: 6.5em;
+  isolation: isolate;
+  pointer-events: none;
+}
+.bear-cub {
+  --fur: #eabc88;
+  --inner-ear: #ae765b;
+  --coat: #f3c474;
+  --scarf: #9acbb9;
+}
+.bear-coat {
+  position: absolute;
+  inset: 51% 13% 0;
+  overflow: hidden;
+  border-radius: 50% 50% 24% 24%;
+  background: var(--coat);
+  box-shadow: inset -.26em -.14em #34342416;
+}
+.bear-coat::after {
+  content: '';
+  position: absolute;
+  inset: 8% 24% auto;
+  height: 30%;
+  border-radius: 0 0 80% 35%;
+  background: var(--scarf);
+  transform: rotate(-12deg);
+}
+.bear-head {
+  position: absolute;
+  inset: 13% 9% auto;
+  height: 49%;
+  background: var(--fur);
+  border-radius: 48% 48% 44% 44%;
+}
+.bear-head::before, .bear-head::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: -.48em;
+  width: 1.6em;
+  height: 1.6em;
+  border: .34em solid var(--fur);
+  border-radius: 50%;
+  background: var(--inner-ear);
+}
+.bear-head::before { left: -.08em; }
+.bear-head::after { right: -.08em; }
+.bear-eyes {
+  position: absolute;
+  top: 38%;
+  left: 26%;
+  width: .29em;
+  height: .34em;
+  border-radius: 50%;
+  background: #392e2c;
+  box-shadow: 1.8em 0 #392e2c;
+}
+.bear-muzzle {
+  position: absolute;
+  top: 51%;
+  left: 28%;
+  width: 44%;
+  height: 40%;
+  border-radius: 54% 54% 48% 48%;
+  background: #fae4c5;
+}
+.bear-muzzle::before, .bear-muzzle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  translate: -50% 0;
+}
+.bear-muzzle::before {
+  top: 12%;
+  width: .59em;
+  height: .39em;
+  border-radius: 45% 45% 60% 60%;
+  background: #49372f;
+}
+.bear-muzzle::after {
+  top: 48%;
+  width: .57em;
+  height: .25em;
+  border-bottom: .09em solid #49372f;
+  border-radius: 50%;
+}
+.bear-paw {
+  position: absolute;
+  top: 62%;
+  left: 9%;
+  width: 1.1em;
+  height: 1.65em;
+  border-radius: 60%;
+  background: var(--fur);
+  transform: rotate(15deg);
+}
+.bear-cub .bear-paw {
+  top: 49%;
+  left: 80%;
+  transform-origin: 30% 85%;
+  transform: rotate(32deg);
+}
+.bear-family {
+  display: flex;
+  position: absolute;
+  right: 7%;
+  bottom: 17%;
+  align-items: flex-end;
+  justify-content: center;
+  font-size: clamp(16px, 1.6vw, 24px);
+  pointer-events: none;
+}
+.bear-family::before {
+  content: '';
+  position: absolute;
+  inset: auto -4% -.12em;
+  height: .7em;
+  border-radius: 50%;
+  background: #102a2480;
+}
+.bear-family .bear-cub { margin-left: -.5em; font-size: .74em; }
+
+.section-banner:has(> .bear-activity) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: clamp(.6rem, 3vw, 3rem);
+}
+.section-banner:has(> .bear-activity) .section-banner-copy { width: auto; }
+.bear-activity {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-inline-end: clamp(0px, 4vw, 64px);
+  padding: 0 .8em;
+  font-size: clamp(15px, 1.65vw, 23px);
+  pointer-events: none;
+}
+.bear-activity::before {
+  content: '';
+  position: absolute;
+  inset: auto 5% -.1em;
+  height: .58em;
+  border-radius: 50%;
+  background: #19382d29;
+}
+.bear-accessory {
+  position: absolute;
+  top: 59%;
+  right: -.05em;
+  display: grid;
+  place-items: center;
+  width: 2.55em;
+  height: 2.45em;
+  border-radius: .36em;
+  background: #fff4d8;
+  color: #365d50;
+  box-shadow: inset 0 0 0 .1em currentColor, .06em .09em #392e2c33;
+  transform: rotate(8deg);
+}
+.bear-accessory svg { width: 79%; height: 79%; }
+.bear-accessory::after {
+  content: '';
+  position: absolute;
+  bottom: .28em;
+  right: -.21em;
+  width: .63em;
+  height: .76em;
+  border-radius: 60%;
+  background: var(--fur);
+  transform: rotate(18deg);
+}
+.bear-activity[data-activity="phone"] .bear-accessory {
+  top: 53%;
+  right: .05em;
+  width: 1.65em;
+  height: 2.65em;
+  color: #badfca;
+  background: #244840;
+  border: .14em solid #17392f;
+  box-shadow: inset 0 -.22em #365b4e;
+}
+.bear-activity[data-activity="reviewing"] .bear-accessory { height: 2.7em; color: #665235; }
+.bear-activity[data-activity="chatting"] .bear-accessory {
+  top: 3%;
+  right: -.64em;
+  width: 2.15em;
+  height: 1.9em;
+  border-radius: 50%;
+  box-shadow: none;
+  background: #ddf5e4;
+}
+.bear-activity[data-activity="chatting"] .bear-accessory::after { display: none; }
+.bear-activity[data-activity="profile"] .bear-accessory { width: 2.9em; height: 1.85em; background: #f1e8fa; color: #59476b; }
+
+@media (max-width: 570px) {
+  .bear-activity { font-size: 11px; margin: 0; padding: 0 .3em; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .bear-activity[data-activity="phone"] .bear-accessory { animation: bear-lift-phone 1.65s ease-in-out .2s; }
+  .bear-activity:is([data-activity="phone"], [data-activity="reviewing"]) .bear-head {
+    transform-origin: 55% 90%;
+    animation: bear-read 1.55s ease-in-out .35s;
+  }
+  .bear-activity[data-activity="planning"] .bear-accessory svg { animation: bear-turn-page 1.25s ease-in-out .3s; transform-origin: top; }
+  .bear-activity[data-activity="chatting"] .bear-accessory { animation: bear-speak .65s ease-out .15s backwards; }
+  .bear-activity[data-activity="profile"] .bear-accessory { animation: bear-show-card 1.3s ease-in-out .2s; }
+}
+@keyframes bear-lift-phone { 40%, 68% { transform: translate(-.13em, -.38em) rotate(-6deg); } }
+@keyframes bear-read { 40%, 68% { transform: translate(.08em, .13em) rotate(8deg); } }
+@keyframes bear-turn-page { 45% { transform: perspective(5em) rotateX(-50deg); } }
+@keyframes bear-speak { from { opacity: 0; transform: translateY(.25em) scale(.75); } }
+@keyframes bear-show-card { 50% { transform: translateY(-.2em) rotate(-7deg); } }
+
+.planner-art .bear-cub { position: absolute; left: 19%; top: 12%; font-size: 11px; transform: rotate(-8deg); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .bear-cub .bear-paw { animation: cub-wave 1.3s ease-in-out .25s 1; }
+}
+@keyframes cub-wave {
+  0%, 100% { transform: rotate(32deg); }
+  25%, 70% { transform: rotate(56deg); }
+  48% { transform: rotate(18deg); }
+}
+
+@media (max-width: 570px) {
+  .family-page .section-banner-actions { display: flex; align-items: end; min-height: 54px; }
+  .bear-family { font-size: 9px; right: 1.2rem; bottom: 1.5rem; }
+  .hero .planner-art {
+    display: block;
+    inset: auto 1.3rem 1.5rem auto;
+    width: 55px;
+    height: 54px;
+    background: none;
+    mask-image: none;
+    pointer-events: none;
+  }
+  .planner-art .planner-tile, .planner-art .planner-float { display: none; }
+  .planner-art .bear-cub { top: 0; left: 0; font-size: 8px; }
+}

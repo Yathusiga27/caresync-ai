@@ -1,14 +1,24 @@
 # CareSync AI
 
-CareSync AI is a family supervision coordination project. Its goal is to help parents and caregivers keep agreed supervision arrangements up to date when schedules or availability change.
+CareSync AI is an AI-powered family supervision and coordination platform designed to help parents and caregivers manage childcare responsibilities when daily routines and schedules change unexpectedly.
+
+Unlike traditional child monitoring systems that focus primarily on location tracking and activity alerts, CareSync AI focuses on intelligent supervision planning and caregiver coordination. It identifies gaps in existing supervision arrangements, suggests suitable alternatives, and facilitates caregiver handovers through explicit human approval.
+
+Powered by locally hosted language models through Ollama, CareSync AI combines context-aware agent reasoning with structured supervision workflows, ensuring that critical decisions remain under human control.
+
+The project also aims to integrate WSO2 Agent Manager for agent observability, governance, and evaluation, enabling the reliability and safety of AI-assisted coordination to be systematically assessed.
 
 ## Current implementation
 
 - FastAPI `GET /` and `GET /health` endpoints.
 - Typed models for families, family members, caregiver availability, supervision contracts and proposals, approvals, child events, and audit events.
 - `GET /families/{family_id}` and `GET /families/{family_id}/members`.
+- `POST /families/{family_id}/members` adds an active child, caregiver, or guardian in development and test environments.
+- `PATCH /families/{family_id}/members/{member_id}/scheduling-availability` lets an active caregiver update their own availability for new assignments. It requires a matching `actor_id` in development and test environments.
 - `POST /caregivers/{caregiver_id}/availability` and `GET /caregivers/{caregiver_id}/availability`.
 - `POST /supervision/contracts`, `GET /supervision/contracts/{contract_id}`, `POST /supervision/contracts/{contract_id}/cancel`, and `GET /supervision/contracts/{contract_id}/proposals`.
+- `GET /families/{family_id}/contracts` lists a family's supervision contracts in chronological order in development and test environments.
+- `GET /families/{family_id}/schedule-requests?actor_id=...` lists a family member's pending requests. `POST /supervision/contracts/{contract_id}/schedule-decisions` records the assigned caregiver's acceptance or decline of a new schedule. A decline reason is optional. The creating guardian can send a new request for the same event using `POST /supervision/contracts/{contract_id}/request-caregiver`.
 - `POST /agent/events` processes caregiver cancellation events deterministically: it checks full-window availability, creates a versioned replacement proposal, or escalates the contract when no alternative is available. Repeated event IDs are idempotent.
 - `POST /agent/chat` calls the configured Ollama model and exposes read-only tools to retrieve a supervision contract, list alternative caregivers available for its full interval, and validate a replacement suggestion against the current conflicted contract version. The API returns suggestions only; it does not assign caregivers, create proposals, or approve changes.
 - `GET /approvals/pending`, guardian approve/reject endpoints, and caregiver proposal accept/decline endpoints. A replacement contract is created only after both positive responses and a final version and availability check.
@@ -22,10 +32,10 @@ The API persists families, members, caregiver availability, contracts, proposals
 
 | Component | Technology | Status |
 |---|---|---|
-| AI model | Ollama / Qwen3 | Client configured; live inference not yet verified |
+| AI model | Ollama / Qwen3 | Local inference through the CareSync chat API |
 | Agent framework | Python; LangGraph is under consideration for workflow orchestration | Ollama chat and bounded read-only tool use implemented; LangGraph planned |
 | Backend API | FastAPI | Implemented |
-| Frontend | React / Vite / Tailwind CSS | App shell and navigation implemented |
+| Frontend | React / Vite / Tailwind CSS | Family coordination dashboard and local assistant chat |
 | Database | SQLite | Implemented for family coordination data and cancellation events |
 | Agent management | WSO2 Agent Manager | Planned |
 | Identity management | ThunderID | Planned |
@@ -48,6 +58,8 @@ uvicorn backend.main:app --reload
 
 The chat service defaults to `http://127.0.0.1:11434` and model `qwen3:4b`. Override these before starting the server with `CARESYNC_OLLAMA_HOST` and `CARESYNC_OLLAMA_MODEL`. The selected model must already be installed in Ollama; the app does not download models automatically.
 
+Open **CareSync AI Chat** to ask a general question or choose a schedule for the assistant to look up. Follow-up questions include the last three completed exchanges for the selected context. Chat history stays in memory while the page is open and clears when you leave the page, switch preview member, or select **New chat**.
+
 The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
 ### Run the frontend
@@ -60,7 +72,19 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. The foundation includes the five workspace pages and a local demo role switcher. Live dashboard data and workflow actions are pending.
+Open `http://localhost:5173`. Use **Preview as** to choose a named fictional family member. Family Overview shows that person's pending requests, alongside the caregivers and today's supervision. Add a child, caregiver, or guardian on **Family members**. New children and caregivers appear in the **Add schedule** form.
+
+Preview as a guardian to add a schedule. The assigned caregiver can accept or decline from **Approvals** or **View details**, with an optional reason for declining. Acceptance confirms the plan and adds it to **My assignments** in Overview and Approvals. Guardians can track responses and decline reasons under **Upcoming schedules I created** in Overview and Approvals and request another caregiver from the details of a declined event. During the scheduled window, the assigned caregiver can confirm handover from **View details**. The preview picker supplies local actor IDs. A future ThunderID integration can supply authenticated identities at the API boundary while the backend checks assignment and family membership.
+
+To add fictional sample schedules to the local development database, run the following from the repository root. Use the same `CARESYNC_DATABASE_PATH` as the API if you overrode it.
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.seed_sample_schedules
+```
+
+The command adds one pending schedule and one confirmed schedule. It preserves records that already use the sample IDs.
+
+Preview as a caregiver and use **Family members** to set your own availability. **Unavailable** excludes you from new schedules and replacement assignments. Existing assignments can still be handed over as planned. Replacement proposals also require recorded availability for the full supervision window.
 
 The Fetch API client defaults to `/api`. Vite forwards that prefix to the local FastAPI server at `http://127.0.0.1:8000` in development. Copy `frontend/.env.example` to `frontend/.env.local` to override the browser-facing `VITE_API_BASE_URL` or the Vite-only `CARESYNC_API_PROXY_TARGET`.
 
